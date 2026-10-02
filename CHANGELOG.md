@@ -6,6 +6,13 @@ tracker.
 
 ## Unreleased
 
+## v0.1.3
+
+- The library adds `Options.SyncPolicy`. `SyncPolicyFullClient` preserves
+  initial timeline history and self-sent events, including another device on
+  the same account, through the normal encrypted sync pipeline. The zero-value
+  `SyncPolicyBot` keeps connector history and echo filtering unchanged.
+
 ## v0.1.2
 
 - The scripted oversize check now requires fresh warnings in both
