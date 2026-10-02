@@ -19,7 +19,8 @@ Estimated time: ~30 minutes for the whole table; §5.1–5.3 alone is 10.
 
 ## 0. Prerequisites
 
-- `terva` on PATH, podman or docker running (throwaway route), and this
+- `terva` v0.139.7 or later on PATH (rows 17 and 34 say what an older
+  host does differently), podman or docker running (throwaway route), and this
   repo checked out or a release archive unpacked (README, "Installing").
 - A client that renders threads, reactions and edits — Element does (the
   bundled one below, or your own).
@@ -137,7 +138,7 @@ Use the outsider account where it says "outsider".
 | 14 | Approve | before tapping, have the outsider @-mention the bot in the group once (and send one plain line); then tap ① on the ask. The seeds are withdrawn, the outcome renders into the question message, the DM confirmation says "starting with the message that was waiting", and the bot **answers the mention** in the group — the plain line is not replayed (mention-only). terva #867 |
 | 15 | Mention gate | in the group, a plain message does nothing; an @-mention of the bot (Element's pill) becomes an agent turn, attributed `@name:` |
 | 16 | Outsider | the outsider @-mentions the bot in the admitted group; the agent answers (group reach), but the outsider's `/status` gets no answer — owner-only |
-| 17 | Kick | remove the bot from the room; terva revokes the chat (a re-invite re-runs admission). terva v0.138 asks again only after a restart: it does not release the chat's ask claim on removal |
+| 17 | Kick | remove the bot from the room; terva revokes the chat, and a re-invite runs admission again with one fresh ask. Needs terva v0.139.6 or later: v0.138 asks again only after a restart, because it does not release the chat's ask claim on removal |
 | 18 | Encrypted group | repeat rows 12, 14, 15 in a room with encryption turned on before the invite; identical behavior, the mention arrives decrypted with its entity |
 
 Held messages expire after 10 minutes and only the last 5 per chat are
@@ -178,7 +179,7 @@ Requires `--approval ask` (§4).
 
 | # | check | pass looks like |
 |---|---|---|
-| 34 | Thread in | in Element, start a thread on a bot message and send `/approve all` in it first (terva v0.138 gates a thread, even one in the owner's DM, as its own unadmitted chat and asks nobody); then post in it: the reply arrives **in the thread**, and the thread is its own conversation (its context starts from the root snippet, not the room's history) |
+| 34 | Thread in | in Element, start a thread on a bot message and post in it: the reply arrives **in the thread**, and the thread is its own conversation (its context starts from the root snippet, not the room's history). From terva v0.139.7, with `chat_parents`, a thread in the owner's DM is admitted as the DM is. An older host gates the thread as its own unadmitted chat and asks nobody, so send `/approve all` in the thread first |
 | 35 | Thread events | edit, react to, and delete messages inside the thread; each behaves as in §5.5, scoped to the thread — the room conversation never sees them |
 | 36 | Thread after restart | restart terva, edit a thread message sent before the restart; the edit still lands in the thread (re-derived from the event's relation). A **delete** of a pre-restart thread message degrades to the room — a known limitation (README) |
 
@@ -242,7 +243,12 @@ run` for the connector first. With `-pairing` it sets the operator's
 pairing aside so the scripted owner can claim with `/start`, and puts
 it back at exit. Rows 11, 13, 24, and 39 are always skipped, each for
 the reason the report gives. Row 31 runs only with `-allow-always`,
-because it grants the tool for the rest of the terva session. `-rows 2,3,28` runs a subset.
+because it grants the tool for the rest of the terva session.
+`-approve-threads` sends `/approve all` in row 34's thread first, for a
+host older than terva v0.139.7. `-rows 2,3,28` runs a subset; keep row 2
+in a subset with the group rows, because terva learns the owner's DM
+from a message there, not from the `/start` claim, and asks nothing
+until it has.
 `-skip 37` leaves rows out. `-config` names the connector's
 `config.json` when it does not sit beside the pairing file.
 

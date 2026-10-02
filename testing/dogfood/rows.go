@@ -969,18 +969,22 @@ func rowThreadIn(ctx context.Context, d *dogfood) {
 		return
 	}
 	d.thread = root.ID
-	// The host gates every chat whose kind is not dm through admission,
-	// and a thread is its own chat of kind thread, even inside the owner's
-	// DM. Nothing asks for it, so the owner approves it in the thread, for
-	// every message, since a thread in a DM carries no mentions.
-	approve := text("/approve all")
-	approve.RelatesTo = (&event.RelatesTo{}).SetThread(root.ID, root.ID)
-	aFrom := d.owner.mark()
-	d.owner.say(ctx, d.dm, approve)
-	ack, acked := d.owner.reply(ctx, aFrom, d.dm, time.Minute)
-	if !acked {
-		d.add(34, "Thread in", "FAIL", "/approve in the thread got no answer")
-		return
+	// With chat_parents, a thread in the owner's DM is admitted as the DM
+	// is. A host without it gates the thread as its own unadmitted chat of
+	// kind thread and asks nobody, so the owner approves it in the thread,
+	// for every message, since a thread in a DM carries no mentions.
+	how := "with no approval of its own, as its DM is admitted"
+	if d.o.approveThreads {
+		approve := text("/approve all")
+		approve.RelatesTo = (&event.RelatesTo{}).SetThread(root.ID, root.ID)
+		aFrom := d.owner.mark()
+		d.owner.say(ctx, d.dm, approve)
+		ack, acked := d.owner.reply(ctx, aFrom, d.dm, time.Minute)
+		if !acked {
+			d.add(34, "Thread in", "FAIL", "/approve in the thread got no answer")
+			return
+		}
+		how = fmt.Sprintf("after /approve all in the thread (%s)", quote(ack))
 	}
 	c := text("In this thread, reply with exactly the word banana.")
 	c.RelatesTo = (&event.RelatesTo{}).SetThread(root.ID, root.ID)
@@ -992,12 +996,14 @@ func rowThreadIn(ctx context.Context, d *dogfood) {
 	}
 	evt, ok := d.owner.reply(ctx, from, d.dm, turn)
 	switch {
+	case !ok && !d.o.approveThreads:
+		d.add(34, "Thread in", "FAIL", "no reply; a host without chat_parents needs -approve-threads")
 	case !ok:
 		d.add(34, "Thread in", "FAIL", "no reply")
 	case evt.Content.AsMessage().RelatesTo.GetThreadParent() != root.ID:
 		d.add(34, "Thread in", "FAIL", "the reply landed outside the thread: %s", quote(evt))
 	default:
-		d.add(34, "Thread in", "PASS", "after /approve all in the thread (%s), the reply is in the thread: %s", quote(ack), quote(evt))
+		d.add(34, "Thread in", "PASS", "%s, the reply is in the thread: %s", how, quote(evt))
 	}
 }
 

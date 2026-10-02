@@ -39,21 +39,22 @@ import (
 )
 
 type options struct {
-	homeserver   string
-	bot          id.UserID
-	owner        id.UserID
-	ownerPW      string
-	stranger     id.UserID
-	strangerPW   string
-	stateDir     string
-	report       string
-	launch       string
-	pairing      string
-	connectorLog string
-	rows         string
-	skip         string
-	config       string
-	allowAlways  bool
+	homeserver     string
+	bot            id.UserID
+	owner          id.UserID
+	ownerPW        string
+	stranger       id.UserID
+	strangerPW     string
+	stateDir       string
+	report         string
+	launch         string
+	pairing        string
+	connectorLog   string
+	rows           string
+	skip           string
+	config         string
+	allowAlways    bool
+	approveThreads bool
 }
 
 func main() {
@@ -74,6 +75,7 @@ func main() {
 	flag.StringVar(&o.skip, "skip", "", "comma-separated row numbers to leave out")
 	flag.StringVar(&o.config, "config", "", "the connector's config.json (default: beside -pairing)")
 	flag.BoolVar(&o.allowAlways, "allow-always", false, "run row 31, which leaves a durable tool grant in terva")
+	flag.BoolVar(&o.approveThreads, "approve-threads", false, "send /approve all in row 34's thread first, for a host without chat_parents (before terva v0.139.7)")
 	flag.Parse()
 	o.bot, o.owner, o.stranger = id.UserID(bot), id.UserID(owner), id.UserID(stranger)
 	if o.config == "" && o.pairing != "" {

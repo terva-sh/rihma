@@ -113,7 +113,9 @@ text and media also report the containing room's ID and DM/group kind.
 The host admits only the paired owner in DM threads and applies the
 current parent policy to group threads. Owner-only thread restrictions
 can narrow that policy. Thread revocation survives restart, and parent
-revocation stops its threads.
+revocation stops its threads. terva negotiates `chat_parents` from
+v0.139.7. An older host gates each thread as a chat of its own and asks
+nobody about it, so the owner sends `/approve` in the thread.
 
 The format belongs to rihma and terva-conn-matrix; terva treats chat IDs as opaque. Edits and
 reactions on thread messages carry the thread's id even after a restart.
