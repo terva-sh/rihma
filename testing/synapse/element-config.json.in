@@ -1,0 +1,20 @@
+{
+    "default_server_config": {
+        "m.homeserver": {
+            "base_url": "http://127.0.0.1:@SYNAPSE_PORT@",
+            "server_name": "localhost"
+        }
+    },
+    "brand": "Element (rihma throwaway)",
+    "default_theme": "dark",
+    "disable_guests": true,
+    "disable_3pid_login": true,
+    "show_labs_settings": true,
+    "setting_defaults": {
+        "UIFeature.feedback": false,
+        "UIFeature.voip": false
+    },
+    "room_directory": {
+        "servers": ["localhost"]
+    }
+}

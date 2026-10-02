@@ -1,0 +1,59 @@
+# Throwaway test homeserver — never expose this beyond localhost.
+#
+# Open registration, no verification, no federation, sqlite storage, and
+# rate limits cranked so the compliance suite never throttles. Everything
+# mutable lives in /data (bind-mounted from testing/synapse/data, gitignored).
+
+server_name: "localhost"
+pid_file: /data/homeserver.pid
+public_baseurl: "http://127.0.0.1:@SYNAPSE_PORT@/"
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    bind_addresses: ["0.0.0.0"]
+    resources:
+      - names: [client]
+        compress: false
+
+database:
+  name: sqlite3
+  args:
+    database: /data/homeserver.db
+
+log_config: "/config/log.config"
+media_store_path: /data/media_store
+signing_key_path: "/data/localhost.signing.key"
+report_stats: false
+
+# Throwaway-only: anyone may register, no email/captcha.
+enable_registration: true
+enable_registration_without_verification: true
+registration_shared_secret: "testonly-not-a-secret"
+
+# No federation: client-only listener above, and no trusted key servers.
+federation_domain_whitelist: []
+trusted_key_servers: []
+suppress_key_server_warning: true
+
+# The suite registers users, joins rooms, and streams messages much faster
+# than the defaults allow.
+rc_message:
+  per_second: 1000
+  burst_count: 1000
+rc_registration:
+  per_second: 1000
+  burst_count: 1000
+rc_login:
+  address: { per_second: 1000, burst_count: 1000 }
+  account: { per_second: 1000, burst_count: 1000 }
+  failed_attempts: { per_second: 1000, burst_count: 1000 }
+rc_joins:
+  local: { per_second: 1000, burst_count: 1000 }
+  remote: { per_second: 1000, burst_count: 1000 }
+rc_invites:
+  per_room: { per_second: 1000, burst_count: 1000 }
+  per_user: { per_second: 1000, burst_count: 1000 }
+  per_issuer: { per_second: 1000, burst_count: 1000 }
