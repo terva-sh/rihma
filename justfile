@@ -1,8 +1,9 @@
 # rihma dev tasks. `just` lists them.
 #
-# `just ci` runs the same steps as .forgejo/workflows/ci.yml, the gate for
-# internal pull requests. That workflow keeps its commands inline because its
-# container does not install just, so change both together.
+# `just ci` checks source and release archives in any checkout.
+# `just ci-internal` also checks the internal ticket store and release tooling.
+# The internal CI workflow keeps its commands inline because its container
+# does not install just, so change both together.
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
@@ -62,8 +63,11 @@ cross:
 tickets:
     git ticket check --fix --dry-run --strict
 
-# Everything CI runs.
-ci: lint test cross release-snapshot tickets release-tools
+# Source and archive checks available in both development and public checkouts.
+ci: lint test cross release-snapshot
+
+# The full internal CI gate, including checks for files omitted from releases.
+ci-internal: ci tickets release-tools
 
 # Validate .goreleaser.yaml without building anything. Needs goreleaser.
 release-check:

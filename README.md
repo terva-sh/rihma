@@ -37,8 +37,11 @@ CGO_ENABLED=0 go build -tags goolm ./...
 ```
 
 A build without `-tags goolm` fails on purpose, with an error naming
-`internal/buildwithtagsgoolm`. `just` lists the development tasks, and
-`just ci` runs what CI runs.
+`internal/buildwithtagsgoolm`. `just` lists the development tasks.
+`just ci` runs lint, tests, cross-builds, and snapshot archive verification in
+both public and development checkouts; it needs Go, just, and GoReleaser.
+`just ci-internal` adds the ticket-store and release-tooling checks used by
+internal CI; it needs git-ticket and Python 3 as well.
 
 ## The connector
 
