@@ -199,8 +199,7 @@ func (t *transport) ingest(ctx context.Context, evt *event.Event, msg *event.Mes
 
 // translateMedia turns a media message or sticker into a host message
 // with one attachment and no text. A failure drops the whole message and
-// is logged for the operator (a warn frame would be better; see
-// docs/connsdk-proposals.md §1).
+// is logged and reported to the operator through a rate-limited warn frame.
 func (t *transport) translateMedia(ctx context.Context, evt *event.Event, sticker bool) (connsdk.Message, bool) {
 	msg := evt.Content.AsMessage()
 	p, ok := planAttachment(msg, sticker)
@@ -214,6 +213,7 @@ func (t *transport) translateMedia(ctx context.Context, evt *event.Event, sticke
 			what = "sticker"
 		}
 		t.log.Warn().Err(err).Stringer("event_id", evt.ID).Stringer("room_id", evt.RoomID).Msg("dropping " + what)
+		t.notices.droppedMedia(evt.RoomID, evt.ID, what, t.cfg.ceiling())
 		return connsdk.Message{}, false
 	}
 	// Stickers are room-scoped even inside a thread, as in

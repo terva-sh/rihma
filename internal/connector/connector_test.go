@@ -1,8 +1,10 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,11 +37,24 @@ func tervaHome(t *testing.T, sealed bool) string {
 	return home
 }
 
-func TestNewTransportRefusesProtocol1(t *testing.T) {
+func TestHandshakeRefusesProtocol1(t *testing.T) {
 	tervaHome(t, false)
-	_, err := NewTransport(connsdk.Session{Protocol: 1})
-	if err == nil || !strings.Contains(err.Error(), "protocol 2") {
-		t.Fatalf("NewTransport at protocol 1 = %v, want a protocol-floor error", err)
+	cfg := Config()
+	built := false
+	cfg.NewTransport = func(connsdk.Session) (connsdk.Transport, error) {
+		built = true
+		return nil, nil
+	}
+	var out bytes.Buffer
+	err := connsdk.Serve(cfg, strings.NewReader(`{"type":"hello_ack","protocol":1}`+"\n"), &out, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "protocol 1") || built {
+		t.Fatalf("handshake at protocol 1 = %v, constructed transport = %v", err, built)
+	}
+	var hello struct {
+		ProtocolMin int `json:"protocol_min"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &hello); err != nil || hello.ProtocolMin != 2 {
+		t.Fatalf("hello = %s, error = %v; want protocol_min 2", out.Bytes(), err)
 	}
 }
 

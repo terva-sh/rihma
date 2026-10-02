@@ -84,6 +84,12 @@ stopped, re-reads the verdict and offers the emoji verification again.
 `status` shows the account, a masked token, the verification verdict,
 and the key backup.
 
+During `run`, decryption failures, transient connection or sync trouble,
+and dropped attachments also surface in terva's operator output.
+Decryption warnings are limited per room; sync and attachment warnings
+each appear at most once per minute. Diagnostics stay in
+`$TERVA_HOME/logs/connector-rihma.log`.
+
 DM the bot to pair with it. Invite it to rooms and mention it there;
 terva's admission flow gates every group. `terva bot reset --connector
 rihma` logs the device out on the server and removes rihma's state. It

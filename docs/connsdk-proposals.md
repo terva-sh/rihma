@@ -1,29 +1,32 @@
-# connsdk: three gaps found building rihma
+# connsdk: three proposals, now adopted
 
 rihma's connector, `terva-rihma`, is built on terva's Go connector SDK,
-`packages/agent/connsdk`. It aims at parity with terva-conn-matrix, which
-is written against the wire directly. Three things that connector does
-are out of reach of a connsdk transport. Each has a workaround in rihma
-today, so nothing here blocks rihma
-([decision 0005](decisions/0005-connsdk-proposals.md)), and each workaround
-names its section of this file in the code.
+`packages/agent/connsdk`. Three SDK gaps found while matching
+terva-conn-matrix led to the proposals below
+([decision 0005](decisions/0005-connsdk-proposals.md)). All three shipped
+in terva and are available in rihma's pinned terva v0.139.7 SDK. Rihma
+now adopts them without a dependency change:
 
-Each claim was checked against terva v0.139.5, and connsdk and
-connproto are unchanged there since v0.139.3. Line numbers are in
+| SDK hook | rihma behavior |
+|---|---|
+| `Session.Warn(message)` | decryption failures, sync retries, and media drops reach the operator |
+| `Config.ProtocolMin` | protocol 2 is required at the hello handshake |
+| `Config.Verbs` | `verify` is dispatched by the SDK and listed in usage |
+
+Warnings contain fixed guidance, IDs and counts or limits, never raw
+error text, message content or attachment names. Decryption reports use
+the library's per-room UTD window; sync retries and media drops each
+emit at most once per minute, across rooms, while stderr keeps diagnostics.
+
+The historical claims below were checked against terva v0.139.5, where
+connsdk and connproto were unchanged since v0.139.3. Line numbers are in
 `packages/agent/connsdk/connsdk.go` unless another file is named. Trunk
 shas are provenance for the maintainers and will not resolve on terva's
 public mirror.
 
-Ordered by what each gap costs a connector today.
-
-| # | gap | proposal | rihma's workaround | cost today |
-|---|---|---|---|---|
-| 1 | a transport cannot send `warn` | `Session.Warn` | log to stderr | operator never sees it |
-| 2 | no protocol floor | `Config.ProtocolMin` | refuse in `NewTransport` | a late, generic failure |
-| 3 | no custom verbs | `Config.Verbs` | dispatch before `Main` | cosmetic |
-
-The terva tickets carrying these are drafts in terva's own store, filed
-from rihma TKT-01M3T4DXJQ6XZMD9W2Q7XXEVJE.
+The terva tickets carrying these were filed from rihma
+TKT-01M3T4DXJQ6XZMD9W2Q7XXEVJE and are now done. The implementation
+uses a nil-safe `Session.Warn` method instead of the proposed func field.
 
 ---
 
@@ -76,10 +79,11 @@ transport ignores the field.
 to receive a warn func, like `MessageIDSender`. It costs a type assertion
 and a second way to learn about the session, for no gain over a field.
 
-**rihma's workaround.** Operator-facing lines go to the stderr logger
-(`internal/connector/config.go`, `logger`). When this ships, the UTD
-limiter's report, sync retry notices, and media drops move to
-`Session.Warn`, and the stderr lines stay as diagnostics.
+**Previous rihma workaround.** Operator-facing lines went only to the
+stderr logger (`internal/connector/config.go`, `logger`). Now the UTD
+limiter's report, sync retry notices, and media drops also go to
+`Session.Warn`, and stderr keeps diagnostics. The library's
+`OnSyncRetry` callback covers transient Connect and `/sync` failures.
 
 ## 2. Let a connector declare a protocol floor *(one field on `Config`)*
 
@@ -116,12 +120,13 @@ type Config struct {
 (`connproto/connproto.go:19`), and says why, instead of reaching
 `connect`.
 
-**rihma's workaround.** `NewTransport` returns an error when
+**Previous rihma workaround.** `NewTransport` returned an error when
 `Session.Protocol < 2` (`internal/connector/transport.go`, `minProtocol`).
 connsdk reports that as a permanent `connect_error`. The outcome is
 right, since the bridge does not start, but it arrives after a handshake
 that claimed protocol 1 was fine. The message is rihma's, not a
-negotiation failure the host can name.
+negotiation failure the host can name. Now `Config.ProtocolMin: 2`
+requires the floor during hello, before constructing a transport.
 
 ## 3. Let a connector add verbs to `Main` *(one field on `Config`)*
 
@@ -148,10 +153,11 @@ type Config struct {
 }
 ```
 
-**rihma's workaround.** `cmd/terva-rihma/main.go` checks for `verify`
+**Previous rihma workaround.** `cmd/terva-rihma/main.go` checked for `verify`
 before calling `connsdk.Main`, reading the last argument the same way.
 It works. The only costs are that the usage line omits `verify` and that
-the two dispatchers must agree on argument handling.
+the two dispatchers must agree on argument handling. Now `Config.Verbs`
+registers `verify`, and main delegates every verb to the SDK.
 
 ---
 

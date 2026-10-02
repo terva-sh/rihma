@@ -3,7 +3,6 @@ package connector
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"slices"
 	"sync"
@@ -18,8 +17,7 @@ import (
 )
 
 // minProtocol is 2: v2 message identity carries the whole mapping, and
-// v1 puts a message's own id in reply_to. connsdk always advertises
-// protocol_min 1, so the floor is enforced here (docs/connsdk-proposals.md).
+// v1 puts a message's own id in reply_to. The SDK enforces the floor at hello.
 const minProtocol = 2
 
 // Capabilities are declared only for what is implemented. Each later
@@ -45,6 +43,7 @@ func Config() connsdk.Config {
 	return connsdk.Config{
 		Name:         Name,
 		Version:      version.Version,
+		ProtocolMin:  minProtocol,
 		Capabilities: caps,
 		NewTransport: NewTransport,
 		Setup:        Setup,
@@ -52,6 +51,7 @@ func Config() connsdk.Config {
 		Reset:        Reset,
 		Configured:   Configured,
 		Secrets:      &State,
+		Verbs:        map[string]func() error{"verify": Verify},
 	}
 }
 
@@ -69,6 +69,7 @@ type transport struct {
 	dataDir string // the host's, for inbound attachments
 	sent    sentCache
 	log     zerolog.Logger
+	notices *operatorNotices
 
 	nameMu     sync.Mutex
 	name       string
@@ -90,11 +91,9 @@ var (
 )
 
 // NewTransport refuses what can never work, which connsdk reports as a
-// permanent connect_error: a protocol-1 host, and no configuration.
+// permanent connect_error: no configuration. Protocol negotiation has
+// already enforced the floor before this constructor runs.
 func NewTransport(s connsdk.Session) (connsdk.Transport, error) {
-	if s.Protocol < minProtocol {
-		return nil, fmt.Errorf("rihma needs connector protocol %d or newer; this host speaks %d", minProtocol, s.Protocol)
-	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
@@ -103,6 +102,7 @@ func NewTransport(s connsdk.Session) (connsdk.Transport, error) {
 		return nil, errors.New("not configured — run `terva bot setup --connector rihma` first")
 	}
 	t := &transport{cfg: cfg, members: newMembership(), events: newChatEvents(), asks: newAsks(), threads: newThreads(), avatars: newBoundedMap[avatarKey, id.ContentURIString](avatarCacheSize), dataDir: s.DataDir, log: logger()}
+	t.notices = newOperatorNotices(s.Warn, t.log)
 	t.asks.refuse = t.redactRefused
 	t.threads.fetchRoot, t.threads.fetchTitle = t.fetchScope, t.readTitle
 	return t, nil
@@ -112,7 +112,7 @@ func NewTransport(s connsdk.Session) (connsdk.Transport, error) {
 // a homeserver outage at startup is retried by Sync rather than reported
 // as a permanent connect_error.
 func (t *transport) Connect(ctx context.Context) (connsdk.Identity, error) {
-	client, err := rihma.Open(ctx, clientOptions(t.cfg, nil))
+	client, err := rihma.Open(ctx, t.clientOptions())
 	if err != nil {
 		return connsdk.Identity{}, err
 	}

@@ -25,6 +25,7 @@ type Options struct {
     Logger     zerolog.Logger
     OnUTD      func(roomID id.RoomID, count int)
     UTDWindow  time.Duration     // default one minute
+    OnSyncRetry func()           // transient Connect or /sync failure
 }
 
 type Client struct{ *mautrix.Client /* ... */ }
@@ -178,6 +179,21 @@ recovery.
   fails, for size, hash, or network, drops its message and leaves
   nothing behind. Names follow terva-conn-matrix: the event id, a dash,
   and the sanitized name's last 80 characters.
+
+## Connector operator notices
+
+The connector reports decryption failures, transient connect/sync retries,
+and dropped media through the SDK's `Session.Warn`, alongside stderr
+diagnostics. Host notices contain only fixed guidance, IDs, counts and
+size limits. Decryption uses the library's per-room UTD window; sync and
+media notices each have a separate one-minute limit across rooms, with
+constant memory and concurrency protection. `Options.OnSyncRetry` runs
+before transient retries, never for a fatal token error or after sync
+cancellation. Setup and verify keep their terminal output.
+
+The SDK advertises `Config.ProtocolMin: 2` at hello and refuses a lower
+ack before creating the transport. `verify` is registered through
+`Config.Verbs`, so the same SDK dispatcher handles and lists every verb.
 
 ## Tests
 

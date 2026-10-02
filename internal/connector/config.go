@@ -152,10 +152,8 @@ func (sessionStore) Clear(context.Context) error {
 }
 
 // logger writes to stderr, which the host captures into the connector's
-// log. Never log tokens, keys, or message content. What the operator
-// should see (unable-to-decrypt bursts, sync trouble) belongs in a warn
-// frame, which a transport cannot send yet; until then it lands here
-// (docs/connsdk-proposals.md §2).
+// log. Never log tokens, keys, or message content. During run, operational
+// notices also reach the host through Session.Warn.
 func logger() zerolog.Logger {
 	return zerolog.New(os.Stderr).With().Timestamp().Str("connector", Name).Logger().Level(zerolog.InfoLevel)
 }
