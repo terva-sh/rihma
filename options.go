@@ -9,8 +9,28 @@ import (
 	"maunium.net/go/mautrix/id"
 )
 
+// SyncPolicy selects which timeline events reach handlers. It is fixed when
+// Open constructs the Client; it does not change sync or crypto ownership.
+type SyncPolicy uint8
+
+const (
+	// SyncPolicyBot is the zero value. It drops initial non-state history
+	// and self-sent non-state events, preserving connector behavior.
+	SyncPolicyBot SyncPolicy = iota
+	// SyncPolicyFullClient preserves initial history and self-sent events,
+	// including another device on the same account, in joined/left timelines.
+	// Applications reconcile their own send echoes by transaction/event ID.
+	SyncPolicyFullClient
+)
+
+// ErrInvalidSyncPolicy is returned before Open accesses storage or the network.
+var ErrInvalidSyncPolicy = errors.New("rihma: unsupported sync policy")
+
 // Options configures Open.
 type Options struct {
+	// SyncPolicy controls timeline filtering. The default is SyncPolicyBot.
+	// Both policies retain state/to-device processing and crypto-aware sync.
+	SyncPolicy SyncPolicy
 	// Homeserver is the client-server API base URL.
 	Homeserver string
 	// StateDir holds the SQLite store. It must belong to rihma alone:
@@ -43,6 +63,9 @@ type Options struct {
 var ErrNoSession = errors.New("rihma: no stored session and no login given")
 
 func (o *Options) validate() error {
+	if o.SyncPolicy != SyncPolicyBot && o.SyncPolicy != SyncPolicyFullClient {
+		return ErrInvalidSyncPolicy
+	}
 	switch {
 	case o.Homeserver == "":
 		return errors.New("rihma: Options.Homeserver is required")

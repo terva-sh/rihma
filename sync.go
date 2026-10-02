@@ -56,7 +56,9 @@ func backoff(n int) time.Duration {
 func (s *syncer) installHooks(c *Client) {
 	s.OnSync(func(ctx context.Context, resp *mautrix.RespSync, since string) bool {
 		s.failures.Store(0)
-		filterSync(resp, c.UserID, since == "")
+		if c.opts.SyncPolicy == SyncPolicyBot {
+			filterSync(resp, c.UserID, since == "")
+		}
 		// Hooks run before events are dispatched, so a room key in this
 		// response may be stored just after the uploader looks; the next
 		// response or the uploader's timer picks it up.
@@ -92,7 +94,8 @@ func filterSync(resp *mautrix.RespSync, self id.UserID, discardHistory bool) {
 	}
 }
 
-// Sync connects if needed and runs the sync loop until ctx ends or a
+// Sync connects if needed and runs the crypto-aware sync loop, delivering
+// timeline events according to Options.SyncPolicy, until ctx ends or a
 // fatal error: an invalid access token (M_UNKNOWN_TOKEN, matched by
 // errors.Is) or a store failure. Transient failures, including during
 // Connect, are retried with backoff. It resumes from the stored

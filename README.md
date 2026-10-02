@@ -22,6 +22,14 @@ project's own tracker.
 
 ## Building
 
+Library consumers building a chat client should set
+`Options.SyncPolicy: rihma.SyncPolicyFullClient` to receive initial history and
+self-sent timeline events, including messages sent by another device of the
+same account. The zero value, `SyncPolicyBot`, retains connector history/echo
+filtering. Both policies use the same crypto-aware sync lifecycle, state store,
+and one-sync-per-device lock. Applications own timeline persistence and echo
+reconciliation; see [the architecture](docs/architecture.md).
+
 rihma builds only without cgo and on mautrix's pure-Go Olm backend:
 
 ```sh

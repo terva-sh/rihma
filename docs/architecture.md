@@ -17,6 +17,7 @@ ever does. Only `internal/connector` imports both rihma and connsdk.
 func Open(ctx context.Context, opts Options) (*Client, error)
 
 type Options struct {
+    SyncPolicy SyncPolicy       // SyncPolicyBot (zero) or SyncPolicyFullClient
     Homeserver string
     StateDir   string            // rihma's alone: Logout removes it
     Sessions   SessionStore      // access token and pickle key
@@ -83,7 +84,18 @@ over events.
 
 ## Sync discipline
 
-- **History is discarded once.** A sync with no `since` token has its
+`Options.SyncPolicy` is immutable for an opened client. `SyncPolicyBot` is the
+zero value, retaining the connector behavior below. `SyncPolicyFullClient`
+preserves all initial and self-sent timeline events in joined and left rooms,
+including messages from another device on the same account. It bypasses only
+the bot timeline filter: the crypto-aware syncer, state/to-device processing,
+backup hooks, persistent tokens, and account/device lock remain the same.
+Unknown values return `ErrInvalidSyncPolicy` before storage or network access.
+Full clients must reconcile send responses and sync echoes by transaction/event
+ID and maintain their own durable timelines; a persisted sync token does not
+make application-event storage atomic or repair missing history by itself.
+
+- **Bot history is discarded once.** A sync with no `since` token has its
   non-state timeline events removed before any handler sees them. That
   happens only when no `next_batch` was ever stored: the first connect,
   or a lost store. The handoff proposed a marker file for the first
@@ -95,7 +107,7 @@ over events.
   crypto machine's membership tracking stay correct.
 - **Downtime is recovered.** cryptohelper persists `next_batch` in the
   crypto store, so a restart resumes where it stopped.
-- **Echoes are dropped.** Our own non-state timeline events never reach
+- **Bot echoes are dropped.** Our own non-state timeline events never reach
   handlers.
 - **One sync per device.** `Sync` holds an OS lock on
   `StateDir/sync.lock` and a second one, in any process, fails with
