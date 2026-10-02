@@ -31,6 +31,11 @@ type Options struct {
 	OnUTD func(roomID id.RoomID, count int)
 	// UTDWindow is the burst window for OnUTD. Zero means one minute.
 	UTDWindow time.Duration
+	// OnSyncRetry, if set, is called before retrying a transient Connect
+	// or /sync failure. It runs on the sync goroutine and must not block.
+	// A persistent outage may call it repeatedly; callers should rate-limit
+	// operator notices. Fatal errors and cancellation do not call it.
+	OnSyncRetry func()
 }
 
 // ErrNoSession is returned by Open when there is no stored session and

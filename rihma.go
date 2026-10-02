@@ -63,6 +63,7 @@ func Open(ctx context.Context, opts Options) (*Client, error) {
 	}
 	cli.Log = opts.Logger
 	s := newSyncer()
+	s.onRetry = opts.OnSyncRetry
 	cli.Syncer = s
 
 	var pickleKey []byte

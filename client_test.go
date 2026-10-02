@@ -346,6 +346,8 @@ func TestSyncRetriesTransientFailures(t *testing.T) {
 	ctx := context.Background()
 	h := newTestHS(t)
 	opts := testOptions(t, h, t.TempDir())
+	var retries atomic.Int32
+	opts.OnSyncRetry = func() { retries.Add(1) }
 	c, err := Open(ctx, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -369,6 +371,9 @@ func TestSyncRetriesTransientFailures(t *testing.T) {
 	stop := runSync(t, c)
 	waitFor(t, "a message after both retries", func() bool { return len(s.messages()) > 0 })
 	stop()
+	if got := retries.Load(); got != 2 {
+		t.Fatalf("retry notifications = %d, want one for Connect and one for /sync", got)
+	}
 }
 
 func TestLogoutClearsEverything(t *testing.T) {

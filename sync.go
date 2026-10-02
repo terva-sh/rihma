@@ -22,6 +22,7 @@ const (
 type syncer struct {
 	*mautrix.DefaultSyncer
 	failures atomic.Int32
+	onRetry  func()
 }
 
 func newSyncer() *syncer {
@@ -33,6 +34,9 @@ func newSyncer() *syncer {
 func (s *syncer) OnFailedSync(_ *mautrix.RespSync, err error) (time.Duration, error) {
 	if errors.Is(err, mautrix.MUnknownToken) {
 		return 0, err
+	}
+	if s.onRetry != nil {
+		s.onRetry()
 	}
 	return backoff(int(s.failures.Add(1))), nil
 }
@@ -112,6 +116,9 @@ func (c *Client) Sync(ctx context.Context) error {
 			return errors.Join(err, ctx.Err())
 		}
 		c.opts.Logger.Warn().Err(err).Int("attempt", n).Msg("connect failed; retrying")
+		if c.opts.OnSyncRetry != nil {
+			c.opts.OnSyncRetry()
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
