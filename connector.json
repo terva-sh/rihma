@@ -1,0 +1,8 @@
+{
+  "name": "rihma",
+  "version": "0.1.0",
+  "exec": "./run.sh",
+  "args": [],
+  "enabled": true,
+  "description": "Matrix chat connector in Go (mautrix-go, E2EE-capable, cgo-free)"
+}
