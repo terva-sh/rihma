@@ -1,0 +1,66 @@
+# GoReleaser builds the archives a release publishes. Pushing a v* tag runs
+# .forgejo/workflows/release.yml, which builds with this file and uploads
+# what it built; no forge host is named here. This follows lampi's config.
+#
+# Every target builds with CGO_ENABLED=0 and -tags goolm, as everything in
+# this repository does: cgo-free is a hard requirement, and a build without
+# goolm fails on purpose (guard_nogoolm.go).
+
+version: 2
+
+project_name: terva-rihma
+
+# No go mod tidy hook: it runs after goreleaser has checked the tree is
+# clean, and a rewrite would stamp vcs.modified into every binary.
+
+builds:
+  - id: terva-rihma
+    main: ./cmd/terva-rihma
+    binary: terva-rihma
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    tags:
+      - goolm
+    # The targets `just cross` and CI build.
+    targets:
+      - linux_amd64
+      - linux_arm64
+      - darwin_arm64
+      - windows_amd64
+
+archives:
+  - id: terva-rihma
+    ids: [terva-rihma]
+    # terva-rihma_0.1.0_linux_amd64.tar.gz, unpacking to rihma/: a
+    # connector directory, with run.sh preferring the binary beside it.
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    wrap_in_directory: rihma
+    # goreleaser fails on an entry matching nothing, so losing any of these
+    # breaks the release loudly. connector.json and run.sh are what terva
+    # runs; MIT wants the notice with every copy.
+    files:
+      - connector.json
+      - run.sh
+      - LICENSE
+      - README.md
+      - CHANGELOG.md
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  # `just release-snapshot` runs the pipeline with no tag and no publish.
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: git
+  filters:
+    exclude:
+      - "^Merge "

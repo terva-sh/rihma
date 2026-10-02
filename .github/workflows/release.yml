@@ -1,0 +1,72 @@
+# Public release: pushing a v* tag builds every target with goreleaser,
+# checks the linux/amd64 archive the way an operator would run it, and only
+# then publishes the archives as a GitHub release.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and Publish Release
+    # Only this repository on github.com publishes. A copy elsewhere, or a
+    # forge that also runs .github/workflows, builds nothing.
+    if: github.server_url == 'https://github.com' && github.repository == 'terva-sh/rihma'
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          # The binary takes its version from the tag at HEAD, and the
+          # changelog reads the log between tags. A shallow checkout would
+          # ship binaries that report no version.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+
+      - name: Test
+        run: |
+          go vet -tags goolm ./...
+          go test -tags goolm ./...
+
+      - name: Build the archives
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean --skip=publish
+        env:
+          # Name the tag, so goreleaser never picks a neighbour on the same
+          # commit by version sort.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+
+      # The tag must name connector.json's version, and the archive must
+      # run without Go. Here it gates the upload.
+      - name: Verify the archive
+        run: |
+          set -eu
+          WANT_VERSION="${GITHUB_REF_NAME#v}" testing/release/verify.sh dist/terva-rihma_*_linux_amd64.tar.gz
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+          [ -f dist/CHANGELOG.md ] || : > dist/CHANGELOG.md
+          pre=""
+          case "${TAG}" in *-*) pre="--prerelease" ;; esac
+          shopt -s nullglob
+          gh release create "${TAG}" --verify-tag --title "${TAG}" \
+            --notes-file dist/CHANGELOG.md ${pre} \
+            dist/*.tar.gz dist/*.zip dist/checksums.txt
