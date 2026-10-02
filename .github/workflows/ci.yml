@@ -1,6 +1,6 @@
-# CI for rihma on GitHub. It runs the gates `just ci` runs: vet, gofmt,
-# tests, and the cgo-free cross-build, each with CGO_ENABLED=0 and the goolm
-# tag that every build of this repository uses. The commands are inline
+# CI for rihma on GitHub. It runs vet, gofmt, tests, the dependency cgo
+# check and cross-builds, each with CGO_ENABLED=0 and the goolm tag that
+# every build of this repository uses. The commands are inline
 # because the runner does not install just.
 #
 # Go follows go.mod's line, 1.27.x.
@@ -37,7 +37,10 @@ jobs:
           cache: true
 
       - name: go vet
-        run: go vet -tags goolm ./...
+        run: |
+          go vet -tags goolm ./...
+          go vet -tags 'goolm e2e' ./...
+          go vet -tags 'goolm dogfood e2e' ./testing/dogfood/
 
       - name: gofmt
         run: |
@@ -48,11 +51,19 @@ jobs:
             exit 1
           fi
 
-      - name: go test
-        run: go test -tags goolm ./...
+      - name: No mattn/go-sqlite3 in the cgo-free build
+        run: |
+          if go list -deps -tags goolm ./... | grep -qx github.com/mattn/go-sqlite3; then
+            echo "mattn/go-sqlite3 is in the cgo-free build; open the store on the pure-Go driver instead"
+            go mod why -m github.com/mattn/go-sqlite3
+            exit 1
+          fi
 
-      # A cross-compile that passes without cgo is itself a test that no
-      # dependency needs it.
+      - name: go test
+        run: |
+          go test -tags goolm ./...
+          go test -tags 'goolm dogfood' ./testing/dogfood/
+
       - name: Cross-build
         run: |
           for t in linux/amd64 linux/arm64 darwin/arm64 windows/amd64; do
