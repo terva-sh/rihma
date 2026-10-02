@@ -1,0 +1,16 @@
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Throwaway Synapse state (signing key, sqlite, media): `just synapse-clean`
+/testing/synapse/data/
+
+# Decision logs while a run is in flight; distilled into tickets, not kept
+.audit/
+decisions.tsv
+
+.DS_Store
+.idea

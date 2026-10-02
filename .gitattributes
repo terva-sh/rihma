@@ -1,0 +1,2 @@
+.tickets/**/*.md text eol=lf
+.tickets/**/*.md merge=gitticket
