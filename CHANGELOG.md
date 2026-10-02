@@ -6,6 +6,16 @@ tracker.
 
 ## Unreleased
 
+## v0.1.4
+
+- `just ci` now runs source, cross-build, and release archive checks in public
+  checkouts. `just ci-internal` adds ticket-store and release-tool checks for
+  development checkouts.
+- A separate public live-regression workflow runs after release-branch pushes,
+  weekly, and on manual dispatch. It covers encrypted history and resume,
+  connector scenarios, and real-host operator warnings against a disposable
+  local Synapse and fake model endpoint.
+
 ## v0.1.3
 
 - The library adds `Options.SyncPolicy`. `SyncPolicyFullClient` preserves

@@ -4,4 +4,4 @@ package version
 
 // Version is reported in the connector's hello and must equal
 // connector.json's "version".
-const Version = "0.1.3"
+const Version = "0.1.4"
