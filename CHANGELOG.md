@@ -4,6 +4,29 @@ Phases (P0 to P8) are the stages of the implementation plan. Entries
 that cite a ticket name it as `TKT-…`, an ID in the project's own
 tracker.
 
+## Unreleased
+
+## v0.1.2
+
+- The scripted oversize check now requires fresh warnings in both
+  terva's operator output and the connector log for the sent event.
+  Dogfood evidence tests reject stale, unrelated and log-only warnings.
+- `just e2e` can exercise warning delivery, rate limits and outage
+  recovery through the real terva host with a local fake model endpoint.
+  Set `RIHMA_E2E_TERVA` to a terva v0.139.7 or later binary. The Synapse
+  harness accepts separate container names, data and ports for concurrent
+  isolated runs.
+- Decryption failures, transient connection or sync retries, and dropped
+  attachments or stickers now reach terva's operator output through
+  `Session.Warn`, alongside stderr diagnostics. Notices contain IDs,
+  counts, limits and fixed guidance. Decryption uses the per-room UTD
+  window; sync and media notices each appear at most once per minute.
+- The connector requires protocol 2 during the hello handshake and
+  registers `verify` with the SDK, which now lists it in usage. All
+  three SDK hooks are already in the pinned terva v0.139.7.
+- The library adds `Options.OnSyncRetry`, called before transient
+  Connect or `/sync` retries so callers can report outages.
+
 ## v0.1.1
 
 - **A re-invite announces the bot once.** When the bot rejoins a room it
