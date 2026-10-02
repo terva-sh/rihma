@@ -1,0 +1,63 @@
+# Live regressions for the public release, using disposable local accounts.
+# No real homeserver or model-provider credentials are used.
+name: e2e
+
+on:
+  push:
+    branches: [release]
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CGO_ENABLED: "0"
+  CONTAINER_ENGINE: docker
+  SYNAPSE_IMAGE: ghcr.io/element-hq/synapse@sha256:38879c6039381b9b66a2adb11b92c63dd5f7ee6a443b98d1edf10ffe004e17e4
+  ELEMENT_IMAGE: docker.io/vectorim/element-web@sha256:3e7dbd4424de9e11c812bc740acf2725b2abe66ea0d0802023b56fd85d3fa09a
+  SYNAPSE_NAME: rihma-e2e-synapse-${{ github.run_id }}-${{ github.run_attempt }}
+  ELEMENT_NAME: rihma-e2e-element-${{ github.run_id }}-${{ github.run_attempt }}
+  SYNAPSE_DATA_DIR: ${{ github.workspace }}/bin/e2e-synapse
+
+jobs:
+  live:
+    name: Encrypted sync and connector regressions
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+
+      - uses: extractions/setup-just@v3
+        with:
+          just-version: "1.58.0"
+
+      # Use the same released host version as the connector SDK dependency.
+      # go install builds in the host's own module, without editing go.mod.
+      - name: Build the real host
+        run: |
+          terva_version=$(go list -m -f '{{.Version}}' terva.sh/terva)
+          GOBIN="$PWD/bin" go install -tags goolm "terva.sh/terva/cmd/terva@$terva_version"
+          bin/terva --version
+          go version -m bin/terva | grep -E 'build\s+(CGO_ENABLED|-tags)='
+
+      # The explicit host path enables the operator-warning test, including
+      # rate limits and recovery with a local fake model endpoint.
+      - name: Run the complete throwaway Synapse suite
+        run: RIHMA_E2E_TERVA="$PWD/bin/terva" just e2e
+
+      # No logs, session files or container data are uploaded as artifacts.
+      - name: Remove this job's containers
+        if: always()
+        run: testing/synapse/harness.sh down

@@ -222,6 +222,15 @@ Before calling something a host gap, read terva-conn-matrix's
 
 ### Live operator-warning regression
 
+The public `e2e` workflow runs the complete throwaway-Synapse suite after each
+release-branch push, weekly, and on manual dispatch. It includes encrypted
+full-client history and restart catch-up, connector scenarios, and the real-host
+operator-warning regression below. It builds the host at the repository's SDK
+dependency version and uses a local fake model endpoint, with no provider
+credentials. Each job owns its containers and removes them even after a failure;
+it uploads no logs or session files. This separate lane complements the source
+checks in ordinary CI.
+
 `just e2e` includes a real-host warning scenario when `RIHMA_E2E_TERVA`
 points at a terva v0.139.7 or later binary:
 
