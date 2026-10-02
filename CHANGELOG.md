@@ -4,6 +4,21 @@ Phases (P0 to P8) are the stages of the implementation plan. Entries
 that cite a ticket name it as `TKT-…`, an ID in the project's own
 tracker.
 
+## v0.1.1
+
+- **A re-invite announces the bot once.** When the bot rejoins a room it
+  was kicked from, the sync brings its join in the room's state and
+  again in the timeline, and that timeline still holds the kick. rihma
+  reported all three, so the host saw added, removed, added, and asked
+  its owner twice about the same group, withdrawing the first ask midway.
+  rihma now ignores a membership event of the bot that it has already
+  seen or that is older than one it has.
+- **Dogfood checklist for terva v0.139.7.** Row 17, re-admission after a
+  kick, passes on terva v0.139.6 and later. Row 34 no longer needs
+  `/approve all` in a DM thread, because terva v0.139.7 admits it as its
+  DM. The driver keeps that step behind `-approve-threads` for an older
+  host. The README says which host negotiates `chat_parents`.
+
 ## v0.1.0
 
 - The connector uses the public terva v0.139.7 SDK. Thread text and media
