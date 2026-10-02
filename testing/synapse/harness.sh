@@ -15,7 +15,7 @@
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-data="$here/data"
+data=${SYNAPSE_DATA_DIR:-"$here/data"}
 
 engine=${CONTAINER_ENGINE:-}
 if [ -z "$engine" ]; then
@@ -26,8 +26,8 @@ synapse_port=${SYNAPSE_PORT:-18108}
 element_port=${ELEMENT_PORT:-18109}
 synapse_image=${SYNAPSE_IMAGE:-ghcr.io/element-hq/synapse:latest}
 element_image=${ELEMENT_IMAGE:-docker.io/vectorim/element-web:latest}
-synapse_name=rihma-synapse
-element_name=rihma-element
+synapse_name=${SYNAPSE_NAME:-rihma-synapse}
+element_name=${ELEMENT_NAME:-rihma-element}
 
 render() { # template -> data/ with the port filled in
 	sed "s/@SYNAPSE_PORT@/$synapse_port/g" "$here/$1.in" >"$data/$1"
@@ -98,7 +98,7 @@ clean() {
 }
 
 status() {
-	"$engine" ps -a --filter "name=^rihma-(synapse|element)$" --format '{{.Names}}  {{.Status}}'
+	"$engine" ps -a --filter "name=^($synapse_name|$element_name)$" --format '{{.Names}}  {{.Status}}'
 	if curl -fsS "http://127.0.0.1:$synapse_port/health" >/dev/null 2>&1; then
 		echo "synapse healthy on 127.0.0.1:$synapse_port"
 	else

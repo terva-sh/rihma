@@ -94,7 +94,8 @@ func main() {
 // human is one scripted person: a Matrix client and what it has seen.
 type human struct {
 	*rihma.Client
-	bot id.UserID
+	bot  id.UserID
+	done chan struct{} // closed after sync exits and the client is closed
 
 	mu       sync.Mutex
 	msgs     []*event.Event // the bot's messages, in arrival order
@@ -132,7 +133,7 @@ func login(ctx context.Context, o options, user id.UserID, pwFile string) (*huma
 	if err != nil {
 		return nil, fmt.Errorf("log in as %s: %w", user, err)
 	}
-	h := &human{Client: c, bot: o.bot, typing: map[id.RoomID]bool{}, typedAt: map[id.RoomID]time.Time{}, redacted: map[id.EventID]bool{}}
+	h := &human{Client: c, bot: o.bot, done: make(chan struct{}), typing: map[id.RoomID]bool{}, typedAt: map[id.RoomID]time.Time{}, redacted: map[id.EventID]bool{}}
 	c.Handlers().OnEventType(event.EventMessage, func(_ context.Context, evt *event.Event) {
 		if evt.Sender == o.bot {
 			h.mu.Lock()
@@ -161,7 +162,12 @@ func login(ctx context.Context, o options, user id.UserID, pwFile string) (*huma
 	if err := c.Connect(ctx); err != nil {
 		return nil, err
 	}
-	go func() { _ = c.Sync(ctx) }()
+	go func() {
+		defer close(h.done)
+		defer logf.Close()
+		defer c.Close()
+		_ = c.Sync(ctx)
+	}()
 	return h, nil
 }
 

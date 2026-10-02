@@ -24,12 +24,13 @@ build:
 # Run the tests.
 test:
     go test {{tags}} ./...
+    go test -tags 'goolm dogfood' ./testing/dogfood/
 
 # go vet, including the e2e-tagged live tests, which CI cannot run.
 vet:
     go vet {{tags}} ./...
     go vet -tags 'goolm e2e' ./...
-    go vet -tags 'goolm dogfood' ./testing/dogfood/
+    go vet -tags 'goolm dogfood e2e' ./testing/dogfood/
 
 # Rewrite sources with gofmt.
 fmt:
@@ -106,11 +107,13 @@ e2e: synapse
     RIHMA_E2E_HS="http://127.0.0.1:${SYNAPSE_PORT:-18108}" bin/e2e.test -test.run TestE2E -test.v
     # The connector under a fake host; run.sh builds bin/terva-rihma.
     RIHMA_E2E_HS="http://127.0.0.1:${SYNAPSE_PORT:-18108}" go test -tags 'goolm e2e' -count=1 -timeout 10m -v ./e2e/
+    # Real-host warning checks, with RIHMA_E2E_TERVA pointing at terva >=0.139.7.
+    RIHMA_E2E_HS="http://127.0.0.1:${SYNAPSE_PORT:-18108}" go test -tags 'goolm dogfood e2e' -count=1 -timeout 10m -v ./testing/dogfood/
     go version -m bin/terva-rihma | grep -E 'build\s+(CGO_ENABLED|-tags)='
 
 # The public release tooling's offline tests, and the leak check over the
-# public tree HEAD would publish, which reports without failing until
-# go.mod drops its internal terva pin. release/README.md is the procedure.
+# public tree HEAD would publish. Both must pass. release/README.md is
+# the procedure.
 release-tools:
     cd release && python3 -m unittest -q
-    -python3 release/publish.py candidate HEAD
+    python3 release/publish.py candidate HEAD

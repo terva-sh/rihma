@@ -718,21 +718,34 @@ func rowOversize(ctx context.Context, d *dogfood) {
 		return
 	}
 	time.Sleep(20 * time.Second)
-	logBefore, _ := os.ReadFile(d.o.connectorLog)
+	diagnostics, err := markLog(d.o.connectorLog)
+	if err != nil {
+		d.add(27, "Oversize", "FAIL", "cannot mark connector diagnostics: %v", err)
+		return
+	}
+	operator, err := markLog(d.botLog)
+	if err != nil {
+		d.add(27, "Oversize", "FAIL", "cannot mark operator output: %v", err)
+		return
+	}
 	from := d.owner.mark()
-	if _, err := d.owner.SendMedia(ctx, d.dm, rihma.Media{Data: make([]byte, 3<<19), Name: "big.bin", MimeType: "application/octet-stream",
-		MsgType: event.MsgFile, Caption: "reply with exactly the word oak"}); err != nil {
+	evt, err := d.owner.SendMedia(ctx, d.dm, rihma.Media{Data: make([]byte, 3<<19), Name: "big.bin", MimeType: "application/octet-stream",
+		MsgType: event.MsgFile, Caption: "reply with exactly the word oak"})
+	if err != nil {
 		d.add(27, "Oversize", "FAIL", "send: %v", err)
 		return
 	}
 	silent := d.owner.silent(ctx, from, d.dm, quiet)
-	logAfter, _ := os.ReadFile(d.o.connectorLog)
-	dropped := strings.Contains(string(logAfter[min(len(logBefore), len(logAfter)):]), "dropping attachment")
-	if silent && dropped {
-		d.add(27, "Oversize", "PASS", "1.5 MiB over a 1 MiB limit: dropped with a warning, no turn")
+	dropped, warned, err := oversizeEvidence(diagnostics, operator, evt)
+	if err != nil {
+		d.add(27, "Oversize", "FAIL", "cannot read warning evidence: %v", err)
 		return
 	}
-	d.add(27, "Oversize", "FAIL", "silent %v, warning logged %v", silent, dropped)
+	if silent && dropped && warned {
+		d.add(27, "Oversize", "PASS", "1.5 MiB over a 1 MiB limit: operator warned, diagnostic logged, no turn")
+		return
+	}
+	d.add(27, "Oversize", "FAIL", "silent %v, diagnostic logged %v, operator warned %v", silent, dropped, warned)
 }
 
 // setLimit sets max_attachment_mb (0 removes it) and returns the old one.

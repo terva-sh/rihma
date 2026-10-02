@@ -125,7 +125,7 @@ the whole gap.
 |---|---|---|
 | 9 | Encrypted DM | enable encryption in the DM (Element: room settings → Security & Privacy); the conversation keeps working both ways and Element shows the shield on both sides' messages |
 | 10 | Encrypted downtime | repeat row 7 in the encrypted DM; the missed ciphertext decrypts on arrival (its room key rides the queued to-device traffic) |
-| 11 | Unable-to-decrypt | (optional) log Element out and back in AS the human, send before keys re-share; the connector logs the unable-to-decrypt burst, never crashes, and recovers on the next message |
+| 11 | Unable-to-decrypt | (optional) log Element out and back in AS the human, send before keys re-share; terva's operator output warns about the room's unable-to-decrypt burst, diagnostics reach the connector log, and the connector never crashes and recovers on the next message |
 
 ### 5.4 Groups and admission
 
@@ -156,7 +156,7 @@ kept (proposals §7) — approve within that window for row 14's replay.
 | 24 | Bot-originated events | the host `Loop` has no caller for outbound `edit`/`react`/`delete` yet (streaming edits are tracked host work) — nothing to check here; all three are pinned by the live suite |
 | 25 | Inbound image | send a photo in the DM and ask what's in it; a vision-capable model describes it (file lands under the host's `data_dir`, never inline) |
 | 26 | Inbound file | send a text file; the agent reads it with its tools |
-| 27 | Oversize | (optional) set `max_attachment_mb: 1` in `config.json`, restart, send a larger file; it is dropped with a warning in the connector log and nothing is left in `data/` |
+| 27 | Oversize | (optional) set `max_attachment_mb: 1` in `config.json`, restart, send a larger file; it is dropped with a rate-limited warning in terva's operator output, diagnostics stay in the connector log, and nothing is left in `data/`. The scripted row requires a fresh operator warning and a connector diagnostic for that attachment's event ID; a log-only warning fails |
 
 Outbound `send_image`/`send_file` are pinned byte-exact by the live
 suite; here they show up only if your agent setup produces a file to
@@ -219,6 +219,39 @@ Before calling something a host gap, read terva-conn-matrix's
 [docs/connsdk-proposals.md](../docs/connsdk-proposals.md).
 
 ## 7. Scripted humans
+
+### Live operator-warning regression
+
+`just e2e` includes a real-host warning scenario when `RIHMA_E2E_TERVA`
+points at a terva v0.139.7 or later binary:
+
+```bash
+RIHMA_E2E_TERVA=/path/to/terva just e2e
+```
+
+The scenario registers fresh accounts on the throwaway Synapse, starts
+the real host with an isolated `TERVA_HOME`, and uses a local fake model
+endpoint. It needs no provider credentials and never calls a remote
+model. It checks attachment warnings against fresh connector diagnostics,
+undecryptable-event bursts and their aggregated counts, warning rate
+limits, queued-message recovery after a connector-only proxy outage,
+and valid traffic after each failure. It also runs scripted row 27 and
+checks operator notices for leaked fixture content or session secrets.
+The generated session file is read only for that check; its values never
+appear in the test report.
+
+Without `RIHMA_E2E_TERVA`, this additional scenario is explicitly skipped;
+the rest of the live suite still runs. The operator scenario refuses a
+homeserver outside HTTP loopback.
+
+For a concurrent isolated harness, set `SYNAPSE_NAME`, `ELEMENT_NAME`,
+`SYNAPSE_DATA_DIR`, `SYNAPSE_PORT` and `ELEMENT_PORT` before running
+`just e2e`. Use unused container names and loopback ports, and a temporary
+data directory of your own. The same settings apply to `synapse-status`,
+`synapse-down` and `synapse-clean`. Defaults still use `rihma-synapse`,
+`rihma-element`, ports 18108/18109 and `testing/synapse/data`.
+
+### Checklist driver
 
 `testing/dogfood` plays both humans through two password accounts, so
 the table can run without a person at a client. It drives every row it
