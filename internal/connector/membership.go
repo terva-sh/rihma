@@ -24,18 +24,31 @@ import (
 // restarts. Rust keeps an in-memory set seeded from the store at connect;
 // rihma keeps the same set only for an event that arrives without
 // prev_content.
+//
+// A sync can also deliver an event a second time, or one older than the
+// bot's current membership. The join after a re-invite comes in the
+// room's state and again in its timeline, and that timeline still holds
+// the kick before it. Such an event is not a change, so fresh drops it.
 type membership struct {
 	mu        sync.Mutex
 	initial   bool // the sync being dispatched had no since token: history
 	announced map[id.RoomID]bool
 	inviters  map[id.RoomID]id.UserID
+	latest    map[id.RoomID]memberMark
 	frames    chan connsdk.Membership
+}
+
+// memberMark is the newest of the bot's membership events seen in a room.
+type memberMark struct {
+	id id.EventID
+	ts int64
 }
 
 func newMembership() *membership {
 	return &membership{
 		announced: map[id.RoomID]bool{},
 		inviters:  map[id.RoomID]id.UserID{},
+		latest:    map[id.RoomID]memberMark{},
 		frames:    make(chan connsdk.Membership, 64),
 	}
 }
@@ -84,6 +97,24 @@ func (m *membership) change(evt *event.Event) (string, id.UserID) {
 	return "", ""
 }
 
+// fresh reports whether evt is newer than every membership event of the
+// bot already seen in its room, and records it if so. An event without
+// an id or timestamp, such as an invite's stripped state, is always fresh
+// and is not recorded.
+func (m *membership) fresh(evt *event.Event) bool {
+	if evt.ID == "" || evt.Timestamp == 0 {
+		return true
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	last, seen := m.latest[evt.RoomID]
+	if seen && (evt.ID == last.id || evt.Timestamp < last.ts) {
+		return false
+	}
+	m.latest[evt.RoomID] = memberMark{id: evt.ID, ts: evt.Timestamp}
+	return true
+}
+
 func (m *membership) setInitial(initial bool) {
 	m.mu.Lock()
 	m.initial = initial
@@ -109,7 +140,7 @@ func prevMembership(evt *event.Event) (event.Membership, bool) {
 // handleMember turns the bot's own membership events into frames, and
 // joins invites when auto_join allows.
 func (t *transport) handleMember(ctx context.Context, evt *event.Event) {
-	if evt.GetStateKey() != t.self.String() {
+	if evt.GetStateKey() != t.self.String() || !t.members.fresh(evt) {
 		return
 	}
 	change, by := t.members.change(evt)

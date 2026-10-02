@@ -133,6 +133,13 @@ func TestGroupAdmissionAndMentionSignals(t *testing.T) {
 	if str(f, "by_user_id") != hu.UserID.String() {
 		t.Fatalf("second added frame = %v", f)
 	}
+	// The rejoined room's timeline still holds the kick and the join; neither
+	// is announced again.
+	for _, g := range conn.drain(5 * time.Second) {
+		if membershipFrame(room, "removed")(g) || membershipFrame(room, "added")(g) {
+			t.Fatalf("the re-invite announced more than one change: %v", g)
+		}
+	}
 	conn.shutdown()
 	waitJoined(t, ctx, hu.Client, room, bot)
 	if _, err := hu.KickUser(ctx, room, &mautrix.ReqKickUser{UserID: bot}); err != nil {

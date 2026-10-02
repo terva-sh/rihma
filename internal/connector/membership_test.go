@@ -87,3 +87,45 @@ func TestMembershipChanges(t *testing.T) {
 		})
 	}
 }
+
+// A re-invite after a kick, as a sync delivers it: the invite as
+// stripped state, with no id or timestamp, then the join in the room's
+// state, then a timeline that still holds the kick, the invite, and the
+// join. The stripped invite must pass, or the bot never joins, and only
+// the join is a change.
+func TestMembershipRejoinReplaysNothing(t *testing.T) {
+	const mod = id.UserID("@mod:hs")
+	at := func(evt *event.Event, eventID id.EventID, ts int64) *event.Event {
+		evt.ID, evt.Timestamp = eventID, ts
+		return evt
+	}
+	m := newMembership()
+	join1 := at(memberEvt(t, "@bot:hs", "join", "invite", mod), "$join1", 100)
+	kick := at(memberEvt(t, mod, "leave", "join", ""), "$kick", 200)
+	invite := at(memberEvt(t, mod, "invite", "leave", mod), "$invite", 300)
+	join2 := at(memberEvt(t, "@bot:hs", "join", "invite", mod), "$join2", 400)
+
+	stripped := memberEvt(t, mod, "invite", "", "")
+
+	var got []string
+	for i, evt := range []*event.Event{join1, kick, stripped, join2, kick, invite, join2} {
+		if !m.fresh(evt) {
+			if evt == stripped {
+				t.Fatalf("step %d: the stripped invite was dropped", i)
+			}
+			continue
+		}
+		if change, _ := m.change(evt); change != "" {
+			got = append(got, change+" "+evt.ID.String())
+		}
+	}
+	want := []string{"added $join1", "removed $kick", "added $join2"}
+	if len(got) != len(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	}
+}
