@@ -26,6 +26,7 @@ import (
 type testHS struct {
 	ms       *mockserver.MockServer
 	requests atomic.Int32
+	filters  atomic.Int32
 
 	mu     sync.Mutex
 	fail   map[string]int // path suffix -> remaining failures
@@ -54,6 +55,9 @@ func newTestHS(t *testing.T) *testHS {
 	inner := h.ms.Router
 	h.ms.Server.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.requests.Add(1)
+		if strings.HasSuffix(r.URL.Path, "/filter") {
+			h.filters.Add(1)
+		}
 		h.mu.Lock()
 		for suffix, n := range h.fail {
 			if n > 0 && strings.HasSuffix(r.URL.Path, suffix) {

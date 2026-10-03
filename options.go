@@ -1,6 +1,7 @@
 package rihma
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -26,11 +27,32 @@ const (
 // ErrInvalidSyncPolicy is returned before Open accesses storage or the network.
 var ErrInvalidSyncPolicy = errors.New("rihma: unsupported sync policy")
 
+// ErrManagedCryptoUnavailable means the selected mautrix module lacks the
+// optional managed worker API. Open refuses opt-in before storage or network use.
+var ErrManagedCryptoUnavailable = errors.New("rihma: managed crypto background unavailable in dependency")
+
 // Options configures Open.
 type Options struct {
+	// ManagedCryptoBackground opts into cancellation and joining of dependency
+	// crypto workers before Sync returns. It requires managed-background support
+	// in mautrix and makes the Client/Sync single-use. Restore a fresh Client
+	// after stopping. Open returns ErrManagedCryptoUnavailable on an unpatched
+	// dependency. The application must select the public fork replacement in its
+	// root go.mod; dependency replacements are not inherited by consumers.
+	// The default retains existing bot background behavior.
+	ManagedCryptoBackground bool
 	// SyncPolicy controls timeline filtering. The default is SyncPolicyBot.
 	// Both policies retain state/to-device processing and crypto-aware sync.
 	SyncPolicy SyncPolicy
+	// SyncJournal, when set, durably captures each raw response before timeline
+	// filtering/crypto dispatch and before its cursor is committed. The callback
+	// runs on the sync owner and must honor cancellation, bound writes, and return
+	// only after its durable commit. It must not mutate or retain the response;
+	// copy/encode required fields synchronously. Responses may contain secrets.
+	// The caller owns journal protection, replay and idempotent materialization.
+	// Failure stops Sync with ErrSyncJournal without advancing the cursor.
+	// Nil preserves the native early-cursor bot behavior.
+	SyncJournal func(context.Context, *mautrix.RespSync, string) error
 	// Homeserver is the client-server API base URL.
 	Homeserver string
 	// StateDir holds the SQLite store. It must belong to rihma alone:
@@ -44,15 +66,17 @@ type Options struct {
 	// DeviceName is the display name given to a new device at login.
 	DeviceName string
 	// Logger receives rihma's and mautrix's logs. It never receives
-	// tokens, keys, or message content from rihma.
+	// tokens, keys, or message content from rihma. HTTP diagnostic request
+	// bodies are omitted at every log level, including sensitive-log overrides.
 	Logger zerolog.Logger
 	// OnUTD, if set, is told about events that could not be decrypted,
 	// at most once per room per UTDWindow; count is how many failed.
 	OnUTD func(roomID id.RoomID, count int)
 	// UTDWindow is the burst window for OnUTD. Zero means one minute.
 	UTDWindow time.Duration
-	// OnSyncRetry, if set, is called before retrying a transient Connect
-	// or /sync failure. It runs on the sync goroutine and must not block.
+	// OnSyncRetry, if set, is called before retrying a transient Connect,
+	// filter creation, or /sync failure. It runs on the sync goroutine and
+	// must not block.
 	// A persistent outage may call it repeatedly; callers should rate-limit
 	// operator notices. Fatal errors and cancellation do not call it.
 	OnSyncRetry func()

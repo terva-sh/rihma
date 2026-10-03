@@ -73,9 +73,13 @@ over events.
    Encryption's own handlers are installed by Connect; application
    handlers see decrypted events.
 4. **Sync** blocks until its context ends or a fatal error. Transient
-   failures, in Connect or in `/sync`, back off from 1 s doubling to 60 s
+   failures, in Connect, filter creation or in `/sync`, back off from 1 s doubling to 60 s
    and reset on success. `M_UNKNOWN_TOKEN` is fatal and returned, so a
-   supervisor's restart budget applies.
+   supervisor's restart budget applies. Connect and filter creation retry HTTP 408/429/500/502/503/504
+   and transport failures; a server Retry-After may extend its wait. It retains
+   the filter only for the current Sync call and leaves cursor persistence in
+   the underlying store. Initialization/filter/store errors outside those transient
+   cases stop Sync.
 5. **Close** only after Sync has returned. Closing the store under a
    running sync fails with "database is closed".
 6. **Logout** logs out on the server first. If the server cannot be
@@ -206,6 +210,14 @@ cancellation. Setup and verify keep their terminal output.
 The SDK advertises `Config.ProtocolMin: 2` at hello and refuses a lower
 ack before creating the transport. `verify` is registered through
 `Config.Verbs`, so the same SDK dispatcher handles and lists every verb.
+
+## Request diagnostics
+
+The library omits request payloads from mautrix diagnostics at every log level,
+including when sensitive-content logging is enabled in the environment. Request
+IDs, method, status, duration and sizes remain available; the HTTP body sent to
+the server is unchanged. Preserve the installed RequestHook when adding custom
+HTTP instrumentation so the omission continues to apply to every attempt.
 
 ## Tests
 

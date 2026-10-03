@@ -18,9 +18,10 @@ type utdLimiter struct {
 	// afterFunc is time.AfterFunc, replaced in tests.
 	afterFunc func(time.Duration, func()) stopper
 
-	mu      sync.Mutex
-	rooms   map[id.RoomID]*utdRoom
-	stopped bool
+	mu        sync.Mutex
+	callbacks sync.WaitGroup
+	rooms     map[id.RoomID]*utdRoom
+	stopped   bool
 }
 
 type utdRoom struct {
@@ -58,7 +59,9 @@ func (l *utdLimiter) report(room id.RoomID) {
 	r := &utdRoom{}
 	l.rooms[room] = r
 	r.timer = l.afterFunc(l.window, func() { l.flush(room) })
+	l.callbacks.Add(1)
 	l.mu.Unlock()
+	defer l.callbacks.Done()
 	l.notify(room, 1)
 }
 
@@ -80,8 +83,15 @@ func (l *utdLimiter) flush(room id.RoomID) {
 	}
 	r.pending = 0
 	r.timer = l.afterFunc(l.window, func() { l.flush(room) })
+	l.callbacks.Add(1)
 	l.mu.Unlock()
+	defer l.callbacks.Done()
 	l.notify(room, n)
+}
+
+func (l *utdLimiter) stopAndWait() {
+	l.stop()
+	l.callbacks.Wait()
 }
 
 // stop cancels pending windows; failures still being counted are dropped.

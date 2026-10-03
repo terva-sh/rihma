@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 
 	"go.mau.fi/util/dbutil"
 	"maunium.net/go/mautrix"
+	"maunium.net/go/mautrix/crypto"
 	"maunium.net/go/mautrix/crypto/cryptohelper"
 	"maunium.net/go/mautrix/event"
 )
@@ -18,7 +20,8 @@ import (
 // Client is a mautrix client with E2EE, a pure-Go store, and rihma's
 // sync discipline. The embedded *mautrix.Client is deliberately exposed:
 // send, join, and query with it directly. Register event handlers on
-// Handlers(), not by replacing Syncer.
+// Handlers(), not by replacing Syncer. Preserve the installed RequestHook
+// when adding HTTP instrumentation so request payloads stay out of logs.
 type Client struct {
 	*mautrix.Client
 
@@ -27,11 +30,15 @@ type Client struct {
 	backup  backupState
 	db      *dbutil.Database
 	helper  *cryptohelper.CryptoHelper
+	managed managedCryptoBackground
 	syncer  *syncer
 	utd     *utdLimiter
 
 	connectOnce sync.Mutex
 	connected   bool
+	cryptoReady bool
+	syncStarted bool
+	sas         *SASController
 }
 
 const storeFile = "rihma.db"
@@ -42,6 +49,9 @@ const storeFile = "rihma.db"
 func Open(ctx context.Context, opts Options) (*Client, error) {
 	if err := opts.validate(); err != nil {
 		return nil, err
+	}
+	if opts.ManagedCryptoBackground && !supportsManagedCryptoBackground() {
+		return nil, ErrManagedCryptoUnavailable
 	}
 	if err := requireGoolm(); err != nil {
 		return nil, err
@@ -62,6 +72,12 @@ func Open(ctx context.Context, opts Options) (*Client, error) {
 		return nil, fmt.Errorf("rihma: %w", err)
 	}
 	cli.Log = opts.Logger
+	// mautrix can log ordinary message bodies, and its environment override
+	// also enables sensitive request bodies. Omit diagnostic payloads before
+	// each attempt without changing the request sent to the server.
+	cli.RequestHook = func(req *http.Request) {
+		*req = *req.WithContext(context.WithValue(req.Context(), mautrix.LogBodyContextKey, "<request content omitted>"))
+	}
 	s := newSyncer()
 	s.onRetry = opts.OnSyncRetry
 	cli.Syncer = s
@@ -132,11 +148,34 @@ func (c *Client) Connect(ctx context.Context) error {
 	if c.connected {
 		return nil
 	}
-	if err := c.helper.Init(ctx); err != nil {
-		return fmt.Errorf("rihma: crypto init: %w", err)
+	if !c.cryptoReady {
+		if err := c.helper.Init(ctx); err != nil {
+			return fmt.Errorf("rihma: crypto init: %w", err)
+		}
+		c.Crypto = c.helper
+		if c.opts.ManagedCryptoBackground {
+			background, ok := any(c.helper.Machine()).(managedCryptoBackground)
+			if !ok {
+				return ErrManagedCryptoUnavailable
+			}
+			if err := background.EnableManagedBackground(context.Background()); err != nil {
+				return err
+			}
+			c.managed = background
+		}
+		if c.opts.SyncJournal != nil {
+			cursor := &stagedSyncStore{SyncStore: c.Client.Store}
+			c.Client.Store = cursor
+			c.syncer.journal, c.syncer.cursor, c.syncer.user = c.opts.SyncJournal, cursor, c.UserID
+		}
+		c.syncer.installHooks(c)
+		c.cryptoReady = true
 	}
-	c.Crypto = c.helper
-	c.syncer.installHooks(c)
+	if c.sas != nil {
+		if err := c.sas.init(ctx); err != nil {
+			return err
+		}
+	}
 	c.connected = true
 	return nil
 }
@@ -147,6 +186,13 @@ func (c *Client) Handlers() *mautrix.DefaultSyncer { return c.syncer.DefaultSync
 
 // Close releases the store. Call it only after Sync has returned.
 func (c *Client) Close() error {
+	if c.managed != nil {
+		c.managed.StopManagedBackground()
+		c.utd.stopAndWait()
+	}
+	if c.sas != nil {
+		c.sas.stop()
+	}
 	c.utd.stop()
 	return c.helper.Close()
 }
@@ -167,4 +213,16 @@ func (c *Client) Logout(ctx context.Context) error {
 		return fmt.Errorf("rihma: remove state dir: %w", err)
 	}
 	return closeErr
+}
+
+// Detect this optional capability without making ordinary module consumers
+// require a fork. Go does not inherit a dependency's replace directives.
+type managedCryptoBackground interface {
+	EnableManagedBackground(context.Context) error
+	StopManagedBackground()
+}
+
+func supportsManagedCryptoBackground() bool {
+	_, ok := any((*crypto.OlmMachine)(nil)).(managedCryptoBackground)
+	return ok
 }

@@ -30,6 +30,10 @@ filtering. Both policies use the same crypto-aware sync lifecycle, state store,
 and one-sync-per-device lock. Applications own timeline persistence and echo
 reconciliation; see [the architecture](docs/architecture.md).
 
+Applications that select a dependency with the managed worker API can opt into
+joined crypto shutdown; see [managed crypto lifecycle](docs/managed-crypto.md)
+for capability detection, explicit module selection and callback ownership.
+
 rihma builds only without cgo and on mautrix's pure-Go Olm backend:
 
 ```sh
@@ -179,3 +183,7 @@ terva-conn-matrix's harness, so both can run at once.
 ## License
 
 MIT. mautrix-go is MPL-2.0 and is used as a dependency.
+
+Incoming same-account emoji verification can share ordinary Sync through the
+opt-in `EnableSAS` controller. See [verification during sync](docs/verification.md)
+for user commands, lifecycle, timeout and recovery scope.

@@ -18,7 +18,15 @@ import (
 // one account against the isolated Synapse harness. The receiving device first
 // syncs after a send, then observes a live send and a send made while stopped.
 // No recovery shortcut or direct key insertion is used in this test.
-func TestE2EFullClientOtherDeviceHistoryAndResume(t *testing.T) {
+func TestE2EFullClientOtherDeviceHistoryAndResume(t *testing.T) { fullClientHistoryAndResume(t, false) }
+func TestE2EJournalledFullClientHistoryAndResume(t *testing.T)  { fullClientHistoryAndResume(t, true) }
+func TestE2EManagedCryptoHistoryAndResume(t *testing.T) {
+	if !supportsManagedCryptoBackground() {
+		t.Skip("requires explicit managed mautrix dependency")
+	}
+	fullClientHistoryAndResume(t, true, true)
+}
+func fullClientHistoryAndResume(t *testing.T, journal bool, managed ...bool) {
 	hs := e2eHomeserver(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -26,9 +34,25 @@ func TestE2EFullClientOtherDeviceHistoryAndResume(t *testing.T) {
 	register(t, ctx, hs, name, password)
 	opts := e2eOptions(t, hs, name, password, t.TempDir())
 	opts.Logger = zerolog.Nop()
+	opts.ManagedCryptoBackground = len(managed) > 0 && managed[0]
 	sender := openAndSync(t, ctx, opts, nil)
 	opts = e2eOptions(t, hs, name, password, t.TempDir())
 	opts.SyncPolicy, opts.Logger = SyncPolicyFullClient, zerolog.Nop()
+	opts.ManagedCryptoBackground = len(managed) > 0 && managed[0]
+	var captureMu sync.Mutex
+	captured := map[id.EventID]bool{}
+	if journal {
+		opts.SyncJournal = func(_ context.Context, resp *mautrix.RespSync, _ string) error {
+			captureMu.Lock()
+			defer captureMu.Unlock()
+			for _, room := range resp.Rooms.Join {
+				for _, ev := range room.Timeline.Events {
+					captured[ev.ID] = true
+				}
+			}
+			return nil
+		}
+	}
 	receiver, err := Open(ctx, opts)
 	if err != nil {
 		t.Fatal("receiver login failed")
@@ -63,6 +87,14 @@ func TestE2EFullClientOtherDeviceHistoryAndResume(t *testing.T) {
 		c.Handlers().OnEventType(event.EventMessage, func(_ context.Context, evt *event.Event) {
 			if evt.RoomID != room || evt.Sender != sender.UserID {
 				return
+			}
+			if journal {
+				captureMu.Lock()
+				wasCaptured := captured[evt.ID]
+				captureMu.Unlock()
+				if !wasCaptured {
+					t.Error("decrypted event preceded raw capture")
+				}
 			}
 			if !evt.Mautrix.WasEncrypted {
 				t.Error("plaintext handler received unencrypted timeline event")

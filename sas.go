@@ -50,56 +50,54 @@ func (c *Client) AwaitSAS(ctx context.Context, confirm func([]SASEmoji) bool) er
 	}
 	unlock() // only a check: Sync below takes it for real
 
+	controller, err := c.EnableSAS()
+	if err != nil {
+		return err
+	}
+	if err := controller.prepareAwait(); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cb := &sasCallbacks{events: make(chan sasEvent, 16)}
-	vh := verificationhelper.NewVerificationHelper(c.Client, c.OlmMachine(),
-		verificationhelper.NewInMemoryVerificationStore(), cb, false, false, true)
-	if err := vh.Init(ctx); err != nil {
-		return fmt.Errorf("rihma: start verification helper: %w", err)
-	}
 	syncErr := make(chan error, 1)
 	go func() { syncErr <- c.Sync(ctx) }()
-	// Wait for the sync loop to exit before returning, so the caller can
-	// Close the client safely.
 	defer func() { cancel(); <-syncErr }()
+	return awaitSAS(ctx, controller, syncErr, confirm)
+}
 
-	var txn id.VerificationTransactionID
+func awaitSAS(ctx context.Context, controller *SASController, syncErr chan error, confirm func([]SASEmoji) bool) error {
 	for {
 		select {
 		case <-ctx.Done():
-			if txn != "" {
-				_ = vh.CancelVerification(context.WithoutCancel(ctx), txn, event.VerificationCancelCodeTimeout, "timed out")
-			}
 			return ctx.Err()
 		case err := <-syncErr:
-			syncErr <- err // for the deferred wait
+			syncErr <- err
 			return fmt.Errorf("rihma: sync stopped during verification: %w", err)
-		case ev := <-cb.events:
-			switch {
-			case ev.requested:
-				if txn != "" || ev.from != c.UserID || ev.fromDevice == c.DeviceID {
-					_ = vh.DismissVerification(ctx, ev.txn)
-					continue
+		case _, ok := <-controller.Changed():
+			state := controller.awaitSnapshot()
+			switch state.State {
+			case SASRequested:
+				if err := controller.Accept(ctx, state.TransactionID); err != nil {
+					return err
 				}
-				txn = ev.txn
-				if err := vh.AcceptVerification(ctx, txn); err != nil {
-					return fmt.Errorf("rihma: accept verification: %w", err)
-				}
-			case ev.txn != txn:
-				continue
-			case ev.emoji != nil:
-				if !confirm(ev.emoji) {
-					_ = vh.CancelVerification(ctx, txn, event.VerificationCancelCodeSASMismatch, "the emoji did not match")
+			case SASShowing:
+				match := confirm(state.Emoji)
+				err := controller.Confirm(ctx, state.TransactionID, match)
+				if !match {
 					return ErrSASMismatch
 				}
-				if err := vh.ConfirmSAS(ctx, txn); err != nil {
-					return fmt.Errorf("rihma: confirm SAS: %w", err)
+				if err != nil {
+					return err
 				}
-			case ev.cancelled != "":
-				return fmt.Errorf("%w: %s", ErrSASCancelled, ev.cancelled)
-			case ev.done:
+			case SASDone:
 				return nil
+			case SASCancelled:
+				return ErrSASCancelled
+			case SASFailed:
+				return ErrSASOperation
+			}
+			if !ok {
+				return ErrSASUnavailable
 			}
 		}
 	}
@@ -114,18 +112,23 @@ type sasEvent struct {
 	from       id.UserID
 	fromDevice id.DeviceID
 	emoji      []SASEmoji
-	cancelled  string
+	cancelled  event.VerificationCancelCode
 	done       bool
 }
 
 type sasCallbacks struct {
-	events chan sasEvent
+	events   chan sasEvent
+	overflow chan struct{}
 }
 
 func (s *sasCallbacks) post(ev sasEvent) {
 	select {
 	case s.events <- ev:
-	default: // AwaitSAS has returned or is far behind; never block the helper
+	default:
+		select {
+		case s.overflow <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -138,7 +141,7 @@ func (s *sasCallbacks) VerificationReady(context.Context, id.VerificationTransac
 }
 
 func (s *sasCallbacks) VerificationCancelled(_ context.Context, txn id.VerificationTransactionID, code event.VerificationCancelCode, reason string) {
-	s.post(sasEvent{txn: txn, cancelled: fmt.Sprintf("%s (%s)", reason, code)})
+	s.post(sasEvent{txn: txn, cancelled: code})
 }
 
 func (s *sasCallbacks) VerificationDone(_ context.Context, txn id.VerificationTransactionID, _ event.VerificationMethod) {
@@ -146,6 +149,10 @@ func (s *sasCallbacks) VerificationDone(_ context.Context, txn id.VerificationTr
 }
 
 func (s *sasCallbacks) ShowSAS(_ context.Context, txn id.VerificationTransactionID, emojis []rune, descriptions []string, _ []int) {
+	if len(emojis) != 7 || len(descriptions) != 7 {
+		s.post(sasEvent{txn: txn, cancelled: event.VerificationCancelCodeInvalidMessage})
+		return
+	}
 	out := make([]SASEmoji, len(emojis))
 	for i, e := range emojis {
 		out[i] = SASEmoji{Emoji: string(e), Description: descriptions[i]}
