@@ -6,6 +6,28 @@ tracker.
 
 ## Unreleased
 
+## v0.1.5
+
+- Incoming SAS verification can be handled during ordinary full-client sync,
+  with account-scoped commands and cancellation, without a separate sync loop.
+- The optional sync journal durably records each response before advancing its
+  cursor, allowing application storage to replay batches after a restart.
+- Full-client applications can opt into managed crypto worker shutdown before
+  stores close. This requires a compatible lifecycle-enabled mautrix dependency
+  selected explicitly by the application; unsupported dependencies fail early.
+  Default bot behavior and the ordinary upstream dependency remain supported.
+
+- `Sync` now returns permanent crypto initialization failures promptly instead
+  of retrying them as outages. A mismatched restored device or invalid local
+  crypto state leaves the session intact and returns the initialization error.
+- `Sync` retries transient failures while creating its first sync filter,
+  including rate limits, gateway outages, and transport errors. Retry notices
+  include this startup step; cancellation and fatal token or store errors
+  stop it promptly.
+- Library request diagnostics omit message and authentication payloads at every
+  log level, including when mautrix sensitive-content logging is enabled.
+  Request metadata remains available and actual request bodies are unchanged.
+
 ## v0.1.4
 
 - `just ci` now runs source, cross-build, and release archive checks in public
