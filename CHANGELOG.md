@@ -6,6 +6,42 @@ tracker.
 
 ## Unreleased
 
+## v0.1.6
+
+- Applications can opt into the experimental Synapse Sliding Sync dialect with
+  encrypted crash recovery, independent sliding/to-device cursors, full raw
+  journaling, room-list snapshots and normal crypto/extension dispatch. Classic
+  Sync remains the default; changing windows requires reopening. This dialect
+  is tested on Synapse 1.162.0 and does not claim current MSC4186 compatibility.
+- `SASController.Start` requests same-account verification during ordinary sync.
+  The first eligible accepting device selects the peer and starts SAS; outgoing
+  attempts share the controller's bounded lifetime and cancellation handling.
+- `DiscoverLoginFlows` discovers classic password, SSO and token capabilities
+  before opening an account. Its SSO redirect builder keeps browser launch and
+  callback ownership with the application; token login uses existing session
+  initialization and preserves a stored session.
+- `ResetCrossSigningIdentity` replaces a lost cross-signing identity when the
+  person asks for it. It answers the server with the account password or, for a
+  homeserver that delegates accounts to an OAuth 2.0 server, with the person's
+  approval on its account page (`m.oauth`, or the unstable
+  `org.matrix.cross_signing_reset`). The application owns the approval wait.
+  A refused, unfinished or cancelled approval leaves the old identity and recovery
+  key working. `CreateRecoveryKey` keeps its signature, and now has the server
+  accept the new keys before writing secret storage. It returns
+  `ErrPasswordRequired` when a server wants a password it was not given, and
+  `ErrIdentityExists` when an identity appears while it runs.
+- Delegated OAuth login, for homeservers using the Matrix Authentication
+  Service: `DiscoverOAuth` validates the issuer's metadata, `BeginLogin`
+  registers a native public client and builds a PKCE authorization URL, and
+  `Accept` binds the caller-owned callback to its attempt. `Open` exchanges
+  the code through `Options.OAuthLogin` and saves the session, now with an
+  optional `OAuth` field, before returning. Rotated refresh tokens are saved
+  before use, a refused refresh ends `Sync` with `ErrOAuthSessionEnded`, and
+  `Logout` revokes the tokens at the issuer. Classic sessions keep their
+  stored shape. The connector's session store refuses OAuth sessions.
+- New design notes in `docs/` set out the contracts for QR verification,
+  appservice bridges and MatrixRTC. They add no API yet.
+
 ## v0.1.5
 
 - Incoming SAS verification can be handled during ordinary full-client sync,
