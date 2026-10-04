@@ -21,31 +21,40 @@ import (
 // sync discipline. The embedded *mautrix.Client is deliberately exposed:
 // send, join, and query with it directly. Register event handlers on
 // Handlers(), not by replacing Syncer. Preserve the installed RequestHook
-// when adding HTTP instrumentation so request payloads stay out of logs.
+// when adding HTTP instrumentation so request payloads stay out of logs, and
+// do not replace SaveNewToken, which persists rotated OAuth tokens.
 type Client struct {
 	*mautrix.Client
 
-	opts    Options
-	session Session // as last saved
-	backup  backupState
-	db      *dbutil.Database
-	helper  *cryptohelper.CryptoHelper
-	managed managedCryptoBackground
-	syncer  *syncer
-	utd     *utdLimiter
+	opts Options
+	// sessionMu serializes every session write after Open, so a key-backup
+	// save and an OAuth token rotation cannot overwrite each other.
+	sessionMu    sync.Mutex
+	session      Session // as last saved; reads also take backup.mu
+	sessionSaved bool
+	backup       backupState
+	db           *dbutil.Database
+	helper       *cryptohelper.CryptoHelper
+	managed      managedCryptoBackground
+	syncer       *syncer
+	utd          *utdLimiter
 
 	connectOnce sync.Mutex
 	connected   bool
 	cryptoReady bool
 	syncStarted bool
 	sas         *SASController
+	slidingMu   sync.RWMutex
+	slidingView *SlidingSyncView
 }
 
 const storeFile = "rihma.db"
 
 // Open returns a client for the stored session, or logs in with
-// Options.Login when there is none. Restoring a session touches no
-// network; the first network use is Connect, which Sync calls.
+// Options.Login or Options.OAuthLogin when there is none. Restoring a
+// session touches no network; the first network use is Connect, which
+// Sync calls. A stored session always wins: Open then ignores both login
+// options, exchanges nothing and replaces no device.
 func Open(ctx context.Context, opts Options) (*Client, error) {
 	if err := opts.validate(); err != nil {
 		return nil, err
@@ -60,8 +69,13 @@ func Open(ctx context.Context, opts Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if sess == nil && opts.Login == nil {
+	if sess == nil && opts.Login == nil && opts.OAuthLogin == nil {
 		return nil, ErrNoSession
+	}
+	// Check the binding only for a login that will be used: a stored session
+	// wins, but an access token must never reach another homeserver.
+	if sess == nil && opts.OAuthLogin != nil && !opts.OAuthLogin.boundTo(opts.Homeserver) {
+		return nil, fmt.Errorf("%w: authorization belongs to another homeserver", ErrOAuthLogin)
 	}
 	if err := os.MkdirAll(opts.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("rihma: state dir: %w", err)
@@ -103,13 +117,31 @@ func Open(ctx context.Context, opts Options) (*Client, error) {
 		return nil, fmt.Errorf("rihma: crypto: %w", err)
 	}
 	c := &Client{Client: cli, opts: opts, db: db, helper: helper, syncer: s}
+	cli.SaveNewToken = c.saveRefreshedTokens
 	c.backup.wake = make(chan struct{}, 1)
 	c.utd = newUTDLimiter(opts.UTDWindow, opts.OnUTD)
 	helper.DecryptErrorCallback = func(evt *event.Event, _ error) { c.utd.report(evt.RoomID) }
 
 	if sess != nil {
-		c.session = *sess
+		c.session, c.sessionSaved = sess.clone(), true
+		if c.session.OAuth != nil {
+			if err := c.restoreOAuth(); err != nil {
+				c.Close()
+				return nil, err
+			}
+		}
 		if err := c.loadBackupKey(); err != nil {
+			c.Close()
+			return nil, err
+		}
+		return c, nil
+	}
+
+	// OAuth login saves the session as soon as the homeserver confirms the
+	// device, then leaves crypto initialization to Connect, as for a
+	// restored session, so a transient key query cannot orphan the device.
+	if opts.OAuthLogin != nil {
+		if err := c.loginOAuth(ctx, opts.OAuthLogin, pickleKey); err != nil {
 			c.Close()
 			return nil, err
 		}
@@ -128,14 +160,41 @@ func Open(ctx context.Context, opts Options) (*Client, error) {
 		return nil, err
 	}
 	helper.LoginAs = nil
-	c.session = Session{UserID: cli.UserID, DeviceID: cli.DeviceID, AccessToken: cli.AccessToken, PickleKey: pickleKey}
-	if err := opts.Sessions.Save(ctx, &c.session); err != nil {
+	err = c.writeSession(ctx, true, func(s *Session) error {
+		*s = Session{UserID: cli.UserID, DeviceID: cli.DeviceID, AccessToken: cli.AccessToken, PickleKey: pickleKey}
+		return nil
+	})
+	if err != nil {
 		// Without a saved session the new device is unreachable; remove it.
 		_, _ = cli.Logout(ctx)
 		c.Close()
 		return nil, err
 	}
 	return c, nil
+}
+
+// writeSession serializes an edit of the session. It saves the edited copy
+// when the session is already stored, or when commit asks for the first
+// save, and publishes it in memory only after the save succeeds.
+func (c *Client) writeSession(ctx context.Context, commit bool, edit func(*Session) error) error {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+	c.backup.mu.Lock()
+	next := c.session.clone()
+	c.backup.mu.Unlock()
+	if err := edit(&next); err != nil {
+		return err
+	}
+	if commit || c.sessionSaved {
+		if err := c.opts.Sessions.Save(ctx, &next); err != nil {
+			return err
+		}
+		c.sessionSaved = true
+	}
+	c.backup.mu.Lock()
+	c.session = next
+	c.backup.mu.Unlock()
+	return nil
 }
 
 // Connect initializes end-to-end encryption, which queries the server
@@ -153,6 +212,9 @@ func (c *Client) Connect(ctx context.Context) error {
 			return fmt.Errorf("rihma: crypto init: %w", err)
 		}
 		c.Crypto = c.helper
+		if c.opts.SlidingSync != nil {
+			c.StateStore = &slidingStateStore{StateStore: c.StateStore}
+		}
 		if c.opts.ManagedCryptoBackground {
 			background, ok := any(c.helper.Machine()).(managedCryptoBackground)
 			if !ok {
@@ -200,9 +262,17 @@ func (c *Client) Close() error {
 // Logout ends the session: server-side logout first, then the stored
 // session, then the state directory. If the server cannot be reached it
 // returns the error and changes nothing locally, so the device is not
-// orphaned. An already-invalid token counts as logged out.
+// orphaned. An already-invalid token counts as logged out. An OAuth session
+// is ended by revoking its tokens at the issuer (MSC4254), not by /logout.
 func (c *Client) Logout(ctx context.Context) error {
-	if _, err := c.Client.Logout(ctx); err != nil && !errors.Is(err, mautrix.MUnknownToken) {
+	c.sessionMu.Lock()
+	delegated := c.session.OAuth != nil
+	c.sessionMu.Unlock()
+	if delegated {
+		if err := c.Client.OAuthRevokeToken(ctx); err != nil {
+			return oauthRevokeError(ctx, err)
+		}
+	} else if _, err := c.Client.Logout(ctx); err != nil && !errors.Is(err, mautrix.MUnknownToken) {
 		return fmt.Errorf("rihma: logout: %w", err)
 	}
 	if err := c.opts.Sessions.Clear(ctx); err != nil {

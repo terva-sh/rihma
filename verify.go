@@ -13,7 +13,8 @@ import (
 // ErrIdentityExists is returned by CreateRecoveryKey when the account
 // already has a cross-signing identity. Replacing it would make every
 // device and user that trusts the old one distrust this account, so
-// rihma never does it; restore from the existing recovery key instead.
+// CreateRecoveryKey never does it; restore from the existing recovery
+// key instead. ResetCrossSigningIdentity replaces one deliberately.
 var ErrIdentityExists = errors.New("rihma: account already has a cross-signing identity; restore it with its recovery key")
 
 // OlmMachine is the mautrix crypto machine, for verification and trust
@@ -37,39 +38,19 @@ func (c *Client) HasCrossSigningIdentity(ctx context.Context) (bool, error) {
 // secret storage, signs this device with it, and returns the recovery
 // key. The key is secret: show it to the person once and never log it.
 //
-// It returns ErrIdentityExists if the account already has an identity.
-// password answers the server's user-interactive auth for uploading the
-// keys; servers that allow a first upload without it accept "".
+// It returns ErrIdentityExists if the account already has an identity,
+// including one another device creates while this call runs: when the
+// server asks for auth, rihma checks for an identity again before
+// answering. password answers a server that asks for it before accepting
+// a first identity, as servers before Matrix v1.11 did; current servers
+// need none, and "" is fine. If such a server asks and password is "",
+// the call fails with ErrPasswordRequired. On such a server, an identity
+// created between that second check and the upload can still be
+// replaced. The server accepts the keys before anything is
+// written to secret storage; a failure after that is
+// ErrIdentityIncomplete, which ResetCrossSigningIdentity repairs.
 func (c *Client) CreateRecoveryKey(ctx context.Context, password string) (string, error) {
-	if err := c.Connect(ctx); err != nil {
-		return "", err
-	}
-	exists, err := c.HasCrossSigningIdentity(ctx)
-	if err != nil {
-		return "", err
-	}
-	if exists {
-		return "", ErrIdentityExists
-	}
-	mach := c.OlmMachine()
-	var uia mautrix.UIACallback
-	if password != "" {
-		uia = func(resp *mautrix.RespUserInteractive) any {
-			return &mautrix.ReqUIAuthLogin{
-				BaseAuthData: mautrix.BaseAuthData{Type: mautrix.AuthTypePassword, Session: resp.Session},
-				User:         c.UserID.String(),
-				Password:     password,
-			}
-		}
-	}
-	key, _, err := mach.GenerateAndUploadCrossSigningKeys(ctx, uia, "")
-	if err != nil {
-		return "", fmt.Errorf("rihma: create cross-signing identity: %w", err)
-	}
-	if err := c.signSelf(ctx); err != nil {
-		return "", err
-	}
-	return key, nil
+	return c.bootstrapIdentity(ctx, CrossSigningAuth{Password: password}, false)
 }
 
 // RestoreFromRecoveryKey fetches the account's cross-signing keys from

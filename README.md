@@ -30,9 +30,25 @@ filtering. Both policies use the same crypto-aware sync lifecycle, state store,
 and one-sync-per-device lock. Applications own timeline persistence and echo
 reconciliation; see [the architecture](docs/architecture.md).
 
+Library applications can also opt into the [experimental Sliding Sync transport](docs/sliding-sync.md),
+with durable encrypted recovery and independent device acknowledgements. Classic
+Sync remains the default.
+
 Applications that select a dependency with the managed worker API can opt into
 joined crypto shutdown; see [managed crypto lifecycle](docs/managed-crypto.md)
 for capability detection, explicit module selection and callback ownership.
+
+Applications can discover classic login flows and prepare a browser SSO redirect
+before opening an account; see [browser SSO](docs/browser-sso.md) for callback
+ownership, one-use token exchange and session persistence. Homeservers that
+delegate authentication to an OAuth issuer, such as the Matrix Authentication
+Service, use [delegated OAuth login](docs/oauth-login.md) instead, with
+refresh-token rotation and revocation at logout.
+
+Applications can reset a lost cross-signing identity on request, answering the
+server with the account password or, on a homeserver that delegates accounts to
+an OAuth 2.0 server, with the person's approval on its account page; see
+[identity reset](docs/identity-reset.md).
 
 rihma builds only without cgo and on mautrix's pure-Go Olm backend:
 
@@ -184,6 +200,6 @@ terva-conn-matrix's harness, so both can run at once.
 
 MIT. mautrix-go is MPL-2.0 and is used as a dependency.
 
-Incoming same-account emoji verification can share ordinary Sync through the
+Incoming and outgoing same-account emoji verification can share ordinary Sync through the
 opt-in `EnableSAS` controller. See [verification during sync](docs/verification.md)
 for user commands, lifecycle, timeout and recovery scope.

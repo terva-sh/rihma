@@ -45,17 +45,24 @@ func liveSASWait(t *testing.T, ctx context.Context, ready func() bool) {
 	}
 }
 
-// The peer uses mautrix's outgoing helper solely as a test driver. Production
-// exposes only incoming same-account SAS. All accounts/data are disposable;
+// The peer uses mautrix's helper solely as a test driver. Both directions use
+// the production controller on the unverified device. All accounts/data are disposable;
 // assertions print no message bodies, credentials, public keys or emoji.
-func TestE2ESASDuringNormalSync(t *testing.T) { sasDuringNormalSync(t, false) }
+func TestE2ESASDuringNormalSync(t *testing.T)         { sasDuringNormalSync(t, false, false) }
+func TestE2EOutgoingSASDuringNormalSync(t *testing.T) { sasDuringNormalSync(t, false, true) }
 func TestE2EManagedCryptoSASDuringNormalSync(t *testing.T) {
 	if !supportsManagedCryptoBackground() {
 		t.Skip("requires explicit managed mautrix dependency")
 	}
-	sasDuringNormalSync(t, true)
+	sasDuringNormalSync(t, true, false)
 }
-func sasDuringNormalSync(t *testing.T, managed bool) {
+func TestE2EManagedCryptoOutgoingSASDuringNormalSync(t *testing.T) {
+	if !supportsManagedCryptoBackground() {
+		t.Skip("requires explicit managed mautrix dependency")
+	}
+	sasDuringNormalSync(t, true, true)
+}
+func sasDuringNormalSync(t *testing.T, managed, outgoing bool) {
 	hs := e2eHomeserver(t)
 	u, err := url.Parse(hs)
 	if err != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" || u.Port() == "" || os.Getenv("RIHMA_E2E_DISPOSABLE") != "1" {
@@ -151,11 +158,32 @@ func sasDuringNormalSync(t *testing.T, managed bool) {
 		return e == nil && f == nil && a && b
 	})
 	transact := func(mode string) {
-		txn, err := peer.StartVerification(ctx, first.UserID)
+		var txn id.VerificationTransactionID
+		var err error
+		if outgoing {
+			txn, err = controller.Start(ctx)
+		} else {
+			txn, err = peer.StartVerification(ctx, first.UserID)
+		}
 		if err != nil {
 			t.Fatal("outgoing test request failed")
 		}
-		liveSASWait(t, ctx, func() bool { s := controller.Snapshot(); return s.TransactionID == txn && s.State == SASRequested })
+		if outgoing {
+			if s := controller.Snapshot(); s.TransactionID != txn || s.State != SASSent {
+				t.Fatal("outgoing receipt not published")
+			}
+			requested := false
+			for !requested {
+				select {
+				case ev := <-peerCB.events:
+					requested = ev.txn == txn && ev.requested
+				case <-ctx.Done():
+					t.Fatal("outgoing delivery timed out")
+				}
+			}
+		} else {
+			liveSASWait(t, ctx, func() bool { s := controller.Snapshot(); return s.TransactionID == txn && s.State == SASRequested })
+		}
 		// Sending while the verification prompt waits must not start a second sync.
 		sent, err := first.SendText(ctx, room, "synthetic verification fixture")
 		if err != nil {
@@ -168,19 +196,25 @@ func sasDuringNormalSync(t *testing.T, managed bool) {
 			}
 			return
 		}
-		if err := controller.Accept(ctx, txn); err != nil {
-			t.Fatal("accept failed")
-		}
-		select {
-		case ready := <-peerCB.ready:
-			if ready != txn {
-				t.Fatal("wrong ready transaction")
+		if outgoing {
+			if err := peer.AcceptVerification(ctx, txn); err != nil {
+				t.Fatal("peer acceptance failed")
 			}
-		case <-ctx.Done():
-			t.Fatal("peer readiness timed out")
-		}
-		if err := peer.StartSAS(ctx, txn); err != nil {
-			t.Fatal("peer SAS start failed")
+		} else {
+			if err := controller.Accept(ctx, txn); err != nil {
+				t.Fatal("accept failed")
+			}
+			select {
+			case ready := <-peerCB.ready:
+				if ready != txn {
+					t.Fatal("wrong ready transaction")
+				}
+			case <-ctx.Done():
+				t.Fatal("peer readiness timed out")
+			}
+			if err := peer.StartSAS(ctx, txn); err != nil {
+				t.Fatal("peer SAS start failed")
+			}
 		}
 		var peerEmoji []SASEmoji
 		for peerEmoji == nil {

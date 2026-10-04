@@ -3,6 +3,7 @@ package rihma
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -18,12 +19,14 @@ var (
 	ErrSASUnavailable = errors.New("rihma: verification is not running")
 	ErrSASStale       = errors.New("rihma: verification transaction or state changed")
 	ErrSASOperation   = errors.New("rihma: verification operation failed")
+	ErrSASLimit       = errors.New("rihma: verification attempt limit reached")
 )
 
 type SASState string
 
 const (
 	SASIdle      SASState = "idle"
+	SASSent      SASState = "sent"
 	SASRequested SASState = "requested"
 	SASAccepted  SASState = "accepted"
 	SASShowing   SASState = "showing_sas"
@@ -52,10 +55,16 @@ type sasCommand struct {
 	txn    id.VerificationTransactionID
 	action string
 	match  bool
-	result chan error
+	result chan sasResult
 }
 
-// SASController consumes incoming same-account, to-device emoji verification
+type sasResult struct {
+	txn     id.VerificationTransactionID
+	err     error
+	expires time.Time
+}
+
+// SASController handles same-account, to-device emoji verification
 // through Client.Sync. It never starts sync. One controller lasts one Sync;
 // attempts can repeat during that Sync. It does not persist pending attempts.
 // Call EnableSAS before the client's first Sync. Stop Sync before closing stores.
@@ -81,7 +90,7 @@ type SASController struct {
 	stopOnce   sync.Once
 }
 
-// EnableSAS opts into incoming verification without making network requests.
+// EnableSAS opts into verification without making network requests.
 // It returns the same controller on repeated calls, and must precede first Sync.
 // Bot clients that do not opt in retain their existing behavior.
 func (c *Client) EnableSAS() (*SASController, error) {
@@ -230,46 +239,70 @@ func (s *SASController) Confirm(ctx context.Context, txn id.VerificationTransact
 func (s *SASController) Cancel(ctx context.Context, txn id.VerificationTransactionID) error {
 	return s.command(ctx, txn, "cancel", false)
 }
+
+// Start requests SAS verification from the other devices of this account.
+// The first eligible device to accept becomes the peer. It requires an active
+// Sync, permits only one active attempt, and shares the controller attempt limit.
+// Cancellation may return after a request was sent; inspect Snapshot for its state.
+func (s *SASController) Start(ctx context.Context) (id.VerificationTransactionID, error) {
+	result := s.submit(ctx, "", "start", false)
+	return result.txn, result.err
+}
+
 func (s *SASController) command(ctx context.Context, txn id.VerificationTransactionID, action string, match bool) error {
+	return s.submit(ctx, txn, action, match).err
+}
+func (s *SASController) submit(ctx context.Context, txn id.VerificationTransactionID, action string, match bool) sasResult {
 	if err := ctx.Err(); err != nil {
-		return err
+		return sasResult{err: err}
 	}
-	if txn == "" {
-		return ErrSASStale
+	if txn == "" && action != "start" {
+		return sasResult{err: ErrSASStale}
 	}
 	s.mu.Lock()
 	running := s.started && !s.stopped
 	runCtx := s.runCtx
 	s.mu.Unlock()
 	if !running {
-		return ErrSASUnavailable
+		return sasResult{err: ErrSASUnavailable}
 	}
-	cmd := sasCommand{ctx: ctx, txn: txn, action: action, match: match, result: make(chan error, 1)}
+	cmd := sasCommand{ctx: ctx, txn: txn, action: action, match: match, result: make(chan sasResult, 1)}
 	select {
 	case s.commands <- cmd:
 	case <-ctx.Done():
-		return ctx.Err()
+		return sasResult{err: ctx.Err()}
 	case <-runCtx.Done():
-		return ErrSASUnavailable
+		return sasResult{err: ErrSASUnavailable}
 	}
 	select {
-	case err := <-cmd.result:
-		return err
+	case result := <-cmd.result:
+		return result
 	case <-ctx.Done():
-		return ctx.Err()
+		return sasResult{err: ctx.Err()}
 	case <-runCtx.Done():
-		return ErrSASUnavailable
+		return sasResult{err: ErrSASUnavailable}
 	}
 }
 func sasActive(state SASState) bool {
-	return state == SASRequested || state == SASAccepted || state == SASShowing || state == SASConfirmed
+	return state == SASSent || state == SASRequested || state == SASAccepted || state == SASShowing || state == SASConfirmed
 }
 func (s *SASController) run() {
 	defer close(s.done)
+	// Upstream expiry sends to TheirDeviceID even before a peer is selected.
+	// Own outgoing expiry so pending requests cancel all recipients and terminate
+	// locally even if a homeserver rejects that upstream empty-device send.
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
+	var expiry <-chan time.Time
+	var expiryTxn id.VerificationTransactionID
 	for {
 		select {
 		case <-s.runCtx.Done():
 			return
+		case <-expiry:
+			expiry = nil
+			s.handle(sasEvent{txn: expiryTxn, expired: true})
 		case <-s.callbacks.overflow:
 			current := s.Snapshot()
 			all, _ := s.store.GetAllVerificationTransactions(s.runCtx)
@@ -283,7 +316,21 @@ func (s *SASController) run() {
 		case ev := <-s.callbacks.events:
 			s.handle(ev)
 		case cmd := <-s.commands:
-			cmd.result <- s.execute(cmd)
+			if cmd.action == "start" {
+				result := s.executeStart(cmd.ctx)
+				if result.err == nil {
+					timer.Reset(time.Until(result.expires))
+					expiry = timer.C
+					expiryTxn = result.txn
+				}
+				cmd.result <- result
+			} else {
+				cmd.result <- sasResult{err: s.execute(cmd)}
+			}
+		}
+		if expiry != nil && !sasActive(s.Snapshot().State) {
+			timer.Stop()
+			expiry = nil
 		}
 	}
 }
@@ -314,6 +361,15 @@ func (s *SASController) handle(ev sasEvent) {
 		return
 	}
 	switch {
+	case ev.expired:
+		ctx := zerolog.Nop().WithContext(s.runCtx)
+		_ = s.helper.CancelVerification(ctx, ev.txn, event.VerificationCancelCodeTimeout, "Verification timed out")
+		_ = s.helper.DismissVerification(ctx, ev.txn)
+		s.set(SASCancelled, ev.txn, current.OtherDevice, nil, "timeout")
+	case ev.ready:
+		if current.State == SASSent {
+			s.startReady(ev)
+		}
 	case ev.emoji != nil:
 		if current.State == SASAccepted {
 			s.set(SASShowing, ev.txn, current.OtherDevice, ev.emoji, "")
@@ -324,6 +380,88 @@ func (s *SASController) handle(ev sasEvent) {
 	case ev.done:
 		s.set(SASDone, ev.txn, current.OtherDevice, nil, "")
 	}
+}
+
+func (s *SASController) executeStart(caller context.Context) sasResult {
+	ctx, cancel := context.WithCancel(zerolog.Nop().WithContext(caller))
+	defer cancel()
+	stop := context.AfterFunc(s.runCtx, cancel)
+	defer stop()
+	// StartVerification saves only after sending. Hold admission until that save
+	// and our snapshot update finish, including when a peer replies immediately.
+	s.gate.mu.Lock()
+	defer s.gate.mu.Unlock()
+	if ctx.Err() != nil {
+		return sasResult{err: ctx.Err()}
+	}
+	all, _ := s.store.GetAllVerificationTransactions(ctx)
+	if sasActive(s.Snapshot().State) || len(all) != 0 {
+		return sasResult{err: ErrSASStale}
+	}
+	if s.gate.attempts >= 64 {
+		return sasResult{err: ErrSASLimit}
+	}
+	devices, err := s.client.OlmMachine().CryptoStore.GetDevices(ctx, s.client.UserID)
+	if err == nil && len(devices) == 0 {
+		var keys map[id.UserID]map[id.DeviceID]*id.Device
+		keys, err = s.client.OlmMachine().FetchKeys(ctx, []id.UserID{s.client.UserID}, true)
+		devices = keys[s.client.UserID]
+	}
+	peer := false
+	for device := range devices {
+		if device != s.client.DeviceID && device != "" {
+			peer = true
+		}
+	}
+	if err != nil || !peer {
+		s.set(SASFailed, "", "", nil, "operation_failed")
+		if caller.Err() != nil {
+			return sasResult{err: caller.Err()}
+		}
+		return sasResult{err: ErrSASOperation}
+	}
+	// Failed sends also create upstream expiration workers. Count attempts before
+	// calling upstream, independently of the successfully saved transaction IDs.
+	s.gate.attempts++
+	expires := time.Now().Add(10 * time.Minute)
+	txn, err := s.helper.StartVerification(ctx, s.client.UserID)
+	if txn != "" {
+		s.gate.recent[txn] = time.Now().Add(10 * time.Minute)
+	}
+	if err != nil {
+		_ = s.helper.DismissVerification(ctx, txn)
+		s.set(SASFailed, txn, "", nil, "operation_failed")
+		if caller.Err() != nil {
+			return sasResult{err: caller.Err()}
+		}
+		return sasResult{err: ErrSASOperation}
+	}
+	s.set(SASSent, txn, "", nil, "")
+	return sasResult{txn: txn, expires: expires}
+}
+
+func (s *SASController) startReady(ev sasEvent) {
+	ctx := zerolog.Nop().WithContext(s.runCtx)
+	s.gate.mu.Lock()
+	defer s.gate.mu.Unlock()
+	txn, err := s.store.GetVerificationTransaction(ctx, ev.txn)
+	if err != nil {
+		// Cancellation/expiry can delete the transaction before callback delivery.
+		return
+	}
+	if !ev.supportsSAS {
+		_ = s.helper.CancelVerification(ctx, ev.txn, event.VerificationCancelCodeUnknownMethod, "SAS is required")
+		err = ErrSASOperation
+	} else if txn.StartEventContent == nil {
+		// If a peer's start already arrived, use it instead of sending a second.
+		err = s.helper.StartSAS(ctx, ev.txn)
+	}
+	if err != nil {
+		_ = s.helper.DismissVerification(ctx, ev.txn)
+		s.set(SASFailed, ev.txn, ev.fromDevice, nil, "operation_failed")
+		return
+	}
+	s.set(SASAccepted, ev.txn, ev.fromDevice, nil, "")
 }
 func safeSASReason(code event.VerificationCancelCode) string {
 	switch code {
@@ -395,10 +533,11 @@ func (s *SASController) execute(cmd sasCommand) error {
 // in-room and cross-user requests here prevents helper transactions/timers for
 // unsupported requests, rather than merely hiding their UI callbacks.
 type sasEventGate struct {
-	mu     sync.Mutex
-	active bool
-	store  *sasStore
-	recent map[id.VerificationTransactionID]time.Time
+	mu       sync.Mutex
+	active   bool
+	store    *sasStore
+	recent   map[id.VerificationTransactionID]time.Time
+	attempts int
 }
 type sasHandlerSyncer struct {
 	*mautrix.DefaultSyncer
@@ -433,10 +572,18 @@ func (s *sasHandlerSyncer) OnEventType(kind event.Type, handler mautrix.EventHan
 				}
 				// Remember IDs for the whole controller lifetime. An expiration worker
 				// can be delayed beyond its deadline, so time alone cannot make reuse safe.
-				if _, reused := s.gate.recent[req.TransactionID]; reused || len(s.gate.recent) >= 64 {
+				if _, reused := s.gate.recent[req.TransactionID]; reused || s.gate.attempts >= 64 {
 					return
 				}
 				s.gate.recent[req.TransactionID] = req.Timestamp.Add(10 * time.Minute)
+				s.gate.attempts++
+			}
+		}
+		if kind == event.ToDeviceVerificationReady && s.gate.store != nil {
+			ready := ev.Content.AsVerificationReady()
+			txn, err := s.gate.store.GetVerificationTransaction(ctx, ready.TransactionID)
+			if err != nil || ready.FromDevice == "" || ready.FromDevice == s.device || len(ready.FromDevice) > 256 || txn.VerificationState != verificationhelper.VerificationStateRequested || !slices.Contains(txn.SentToDeviceIDs, ready.FromDevice) {
+				return
 			}
 		}
 		handler(zerolog.Nop().WithContext(ctx), ev)

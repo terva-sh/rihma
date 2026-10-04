@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"maunium.net/go/mautrix/id"
 )
@@ -26,11 +27,39 @@ type Session struct {
 	BackupKey []byte `json:"backup_key,omitempty"`
 	// BackupVersion is the server's version of that backup.
 	BackupVersion id.KeyBackupVersion `json:"backup_version,omitempty"`
+	// OAuth is set only for a session created by delegated OAuth login.
+	// A session without it uses classic Matrix login and logout.
+	OAuth *OAuthSession `json:"oauth,omitempty"`
+}
+
+// OAuthSession is what refresh and revocation need. RefreshToken is secret:
+// never log it. rihma replaces the stored pair on each rotation and uses the
+// new one only after Save returns.
+type OAuthSession struct {
+	Issuer   string `json:"issuer"`
+	ClientID string `json:"client_id"`
+	// TokenEndpoint and RevocationEndpoint are pinned at login, so a restored
+	// session sends its refresh token only to the endpoint validated then.
+	TokenEndpoint      string    `json:"token_endpoint"`
+	RevocationEndpoint string    `json:"revocation_endpoint"`
+	RefreshToken       string    `json:"refresh_token"`
+	ExpiresAt          time.Time `json:"expires_at"`
+}
+
+// clone copies s so that a later edit cannot reach a stored or saved copy.
+func (s Session) clone() Session {
+	if s.OAuth != nil {
+		o := *s.OAuth
+		s.OAuth = &o
+	}
+	return s
 }
 
 // SessionStore persists the Session. The terva connector implements it
 // on connsdk.SealedState; other programs can use FileSessionStore or
-// their own secret store.
+// their own secret store. Save must replace the whole session atomically
+// and must not use the Client: an OAuth token refresh calls it while
+// mautrix holds requests until the rotated tokens are stored.
 type SessionStore interface {
 	// Load returns nil, nil when no session has been saved.
 	Load(ctx context.Context) (*Session, error)

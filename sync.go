@@ -37,11 +37,15 @@ func newSyncer() *syncer {
 	return &syncer{DefaultSyncer: mautrix.NewDefaultSyncer()}
 }
 
-// OnFailedSync stops on an invalid token, which retrying cannot fix,
-// and otherwise waits 1 s, 2 s, 4 s ... up to a minute.
+// OnFailedSync stops on an invalid token or a refused OAuth refresh,
+// which retrying cannot fix, and otherwise waits 1 s, 2 s, 4 s ... up to
+// a minute.
 func (s *syncer) OnFailedSync(_ *mautrix.RespSync, err error) (time.Duration, error) {
 	if errors.Is(err, mautrix.MUnknownToken) {
 		return 0, err
+	}
+	if oauthRefreshRefused(err) {
+		return 0, classifySessionEnd(err)
 	}
 	if s.onRetry != nil {
 		s.onRetry()
@@ -105,7 +109,8 @@ func filterSync(resp *mautrix.RespSync, self id.UserID, discardHistory bool) {
 // Sync connects if needed and runs the crypto-aware sync loop, delivering
 // timeline events according to Options.SyncPolicy, until ctx ends or a
 // fatal error: an invalid access token (M_UNKNOWN_TOKEN, matched by
-// errors.Is) or a store failure. Transient failures, including during
+// errors.Is), a refused OAuth refresh (ErrOAuthSessionEnded, which also
+// matches M_UNKNOWN_TOKEN) or a store failure. Transient failures, including during
 // Connect and filter creation, are retried with backoff. It resumes from the stored
 // next_batch, so messages sent while the program was down are delivered.
 // On cancellation it returns ctx.Err(). Call Close only after it returns.
@@ -132,6 +137,9 @@ func (c *Client) Sync(ctx context.Context) error {
 		}
 		if errors.Is(err, mautrix.MUnknownToken) || ctx.Err() != nil {
 			return errors.Join(err, ctx.Err())
+		}
+		if oauthRefreshRefused(err) {
+			return classifySessionEnd(err)
 		}
 		delay, retry := startupRetryDelay(err, n)
 		if !retry {
@@ -161,8 +169,10 @@ func (c *Client) Sync(ctx context.Context) error {
 	// bootstrap also stops the verification controller before stores close.
 	originalStore := c.Store
 	defer func() { c.Store = originalStore }()
-	if err := c.prepareSyncFilter(ctx); err != nil {
-		return err
+	if c.opts.SlidingSync == nil {
+		if err := c.prepareSyncFilter(ctx); err != nil {
+			return classifySessionEnd(err)
+		}
 	}
 	// The uploader stops with the sync loop however it ends, and Sync
 	// waits for it, so Close never races an upload.
@@ -170,6 +180,9 @@ func (c *Client) Sync(ctx context.Context) error {
 	uploads := make(chan struct{})
 	go func() { defer close(uploads); c.runBackupUploads(upCtx) }()
 	defer func() { stopUploads(); <-uploads }()
+	if c.opts.SlidingSync != nil {
+		return c.runSlidingSync(ctx)
+	}
 	return c.SyncWithContext(ctx)
 }
 

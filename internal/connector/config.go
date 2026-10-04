@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -127,6 +128,11 @@ func (sessionStore) Load(context.Context) (*rihma.Session, error) {
 }
 
 func (sessionStore) Save(_ context.Context, s *rihma.Session) error {
+	// The connector logs in with a password and seals only these fields.
+	// Refuse a delegated session rather than drop its refresh token.
+	if s.OAuth != nil {
+		return errors.New("rihma connector: delegated OAuth sessions are not supported")
+	}
 	c, err := loadConfig()
 	if err != nil {
 		return err

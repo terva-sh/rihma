@@ -268,3 +268,21 @@ func TestStatusReportsVerdict(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionStoreRefusesOAuth: the connector seals only a classic session,
+// so a delegated one must fail loudly instead of losing its refresh token.
+func TestSessionStoreRefusesOAuth(t *testing.T) {
+	ctx := context.Background()
+	tervaHome(t, false)
+	if err := saveConfig(fileConfig{HomeserverURL: "https://hs.example"}); err != nil {
+		t.Fatal(err)
+	}
+	err := (sessionStore{}).Save(ctx, &rihma.Session{UserID: "@bot:hs.example", DeviceID: "DEV", AccessToken: "synthetic-access",
+		PickleKey: []byte("0123456789abcdef0123456789abcdef"), OAuth: &rihma.OAuthSession{RefreshToken: "synthetic-refresh"}})
+	if err == nil {
+		t.Fatal("connector stored an OAuth session it cannot keep")
+	}
+	if got, err := (sessionStore{}).Load(ctx); err != nil || got != nil {
+		t.Fatalf("refused OAuth save left a session: %v, %v", got, err)
+	}
+}

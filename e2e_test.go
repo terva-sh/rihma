@@ -347,6 +347,75 @@ func TestE2ERecoveryKey(t *testing.T) {
 	}
 }
 
+// TestE2EResetIdentityWithPassword: Synapse takes a first identity with
+// no auth, refuses a replacement without the password or with a wrong
+// one (leaving the identity as it was), and takes it with the password.
+// The new recovery key restores on another device; the old one does not.
+func TestE2EResetIdentityWithPassword(t *testing.T) {
+	hs := e2eHomeserver(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	tag := e2eTag()
+	name, pw := "reset-"+tag, "pw-reset"
+	register(t, ctx, hs, name, pw)
+
+	a, err := Open(ctx, e2eOptions(t, hs, name, pw, t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	oldKey, err := a.CreateRecoveryKey(ctx, "")
+	if err != nil {
+		t.Fatalf("first identity without a password: %v", err)
+	}
+	master := func() id.Ed25519 {
+		t.Helper()
+		resp, err := a.QueryKeys(ctx, &mautrix.ReqQueryKeys{DeviceKeys: mautrix.DeviceKeysRequest{a.UserID: mautrix.DeviceIDList{}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		k := resp.MasterKeys[a.UserID]
+		return k.FirstKey()
+	}
+	before := master()
+
+	if _, err := a.ResetCrossSigningIdentity(ctx, CrossSigningAuth{}); !errors.Is(err, ErrPasswordRequired) {
+		t.Fatalf("reset without a password = %v, want ErrPasswordRequired", err)
+	}
+	if _, err := a.ResetCrossSigningIdentity(ctx, CrossSigningAuth{Password: "wrong-" + pw}); !errors.Is(err, mautrix.MForbidden) {
+		t.Fatalf("reset with a wrong password = %v, want M_FORBIDDEN", err)
+	}
+	if got := master(); got != before {
+		t.Fatal("a refused reset replaced the master key")
+	}
+
+	newKey, err := a.ResetCrossSigningIdentity(ctx, CrossSigningAuth{Password: pw})
+	if err != nil {
+		t.Fatalf("reset with the password: %v", err)
+	}
+	if got := master(); got == before || got != a.OlmMachine().CrossSigningKeys.MasterKey.PublicKey() {
+		t.Fatal("the server does not hold this device's new master key")
+	}
+	if ok, err := a.DeviceVerified(ctx); err != nil || !ok {
+		t.Fatalf("device A verified after reset = %v, %v", ok, err)
+	}
+
+	b, err := Open(ctx, e2eOptions(t, hs, name, pw, t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if err := b.RestoreFromRecoveryKey(ctx, oldKey); err == nil {
+		t.Fatal("the old recovery key still restores after a reset")
+	}
+	if err := b.RestoreFromRecoveryKey(ctx, newKey); err != nil {
+		t.Fatalf("restore with the new recovery key: %v", err)
+	}
+	if ok, err := b.DeviceVerified(ctx); err != nil || !ok {
+		t.Fatalf("device B verified after restore = %v, %v", ok, err)
+	}
+}
+
 // assertCiphertextOnWire reads the room timeline as raw JSON from the
 // homeserver, bypassing mautrix, and checks that the messages are Megolm
 // ciphertext and that the plaintext appears nowhere.

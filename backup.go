@@ -147,8 +147,12 @@ func (c *Client) RestoreKeyBackup(ctx context.Context, recoveryKey string) error
 }
 
 func (c *Client) useBackup(ctx context.Context, key *backup.MegolmBackupKey, version id.KeyBackupVersion) error {
+	// Hold the session writer lock across the save so a concurrent OAuth
+	// token rotation is neither lost nor overwritten with an older pair.
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
 	c.backup.mu.Lock()
-	next := c.session
+	next := c.session.clone()
 	next.BackupKey, next.BackupVersion = key.Bytes(), version
 	c.backup.mu.Unlock()
 	if err := c.opts.Sessions.Save(ctx, &next); err != nil {

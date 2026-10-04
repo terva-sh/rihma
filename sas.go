@@ -107,13 +107,16 @@ func awaitSAS(ctx context.Context, controller *SASController, syncErr chan error
 // AwaitSAS's goroutine. The helper fires some callbacks while holding its
 // own lock, so they must not call back into it or block.
 type sasEvent struct {
-	txn        id.VerificationTransactionID
-	requested  bool
-	from       id.UserID
-	fromDevice id.DeviceID
-	emoji      []SASEmoji
-	cancelled  event.VerificationCancelCode
-	done       bool
+	txn         id.VerificationTransactionID
+	requested   bool
+	ready       bool
+	expired     bool
+	supportsSAS bool
+	from        id.UserID
+	fromDevice  id.DeviceID
+	emoji       []SASEmoji
+	cancelled   event.VerificationCancelCode
+	done        bool
 }
 
 type sasCallbacks struct {
@@ -136,8 +139,9 @@ func (s *sasCallbacks) VerificationRequested(_ context.Context, txn id.Verificat
 	s.post(sasEvent{txn: txn, requested: true, from: from, fromDevice: fromDevice})
 }
 
-// VerificationReady needs nothing: the device that asked starts SAS.
-func (s *sasCallbacks) VerificationReady(context.Context, id.VerificationTransactionID, id.DeviceID, bool, bool, *verificationhelper.QRCode) {
+// Callbacks only enqueue: upstream may hold its lock and save after returning.
+func (s *sasCallbacks) VerificationReady(_ context.Context, txn id.VerificationTransactionID, device id.DeviceID, supportsSAS bool, _ bool, _ *verificationhelper.QRCode) {
+	s.post(sasEvent{txn: txn, ready: true, fromDevice: device, supportsSAS: supportsSAS})
 }
 
 func (s *sasCallbacks) VerificationCancelled(_ context.Context, txn id.VerificationTransactionID, code event.VerificationCancelCode, reason string) {

@@ -22,6 +22,7 @@ type Options struct {
     StateDir   string            // rihma's alone: Logout removes it
     Sessions   SessionStore      // access token and pickle key
     Login      *mautrix.ReqLogin // used only when Sessions is empty
+    OAuthLogin *OAuthLogin       // delegated OAuth; used only when Sessions is empty
     DeviceName string
     Logger     zerolog.Logger
     OnUTD      func(roomID id.RoomID, count int)
@@ -38,6 +39,7 @@ func (c *Client) Close() error
 func (c *Client) Logout(ctx context.Context) error
 
 func (c *Client) CreateRecoveryKey(ctx context.Context, password string) (string, error)
+func (c *Client) ResetCrossSigningIdentity(ctx context.Context, auth CrossSigningAuth) (string, error)
 func (c *Client) RestoreFromRecoveryKey(ctx context.Context, recoveryKey string) error
 func (c *Client) HasCrossSigningIdentity(ctx context.Context) (bool, error)
 func (c *Client) DeviceVerified(ctx context.Context) (bool, error)
@@ -65,7 +67,11 @@ over events.
    opens the store, and makes no request, so a restart during a
    homeserver outage does not fail here. Without one it logs in with
    `Options.Login`, initializes encryption, and saves the session before
-   returning; if the save fails it logs the new device out again.
+   returning; if the save fails it logs the new device out again. With
+   `Options.OAuthLogin` it exchanges the authorization code, confirms the
+   device, and saves the session before returning, leaving encryption to
+   Connect; if anything fails after the exchange it revokes the new tokens.
+   See [delegated OAuth login](oauth-login.md).
 2. **Connect** initializes end-to-end encryption. mautrix's cryptohelper
    always queries the server for this device's keys at this point, which
    is why it is not part of Open. It is idempotent, and Sync calls it.
@@ -75,16 +81,18 @@ over events.
 4. **Sync** blocks until its context ends or a fatal error. Transient
    failures, in Connect, filter creation or in `/sync`, back off from 1 s doubling to 60 s
    and reset on success. `M_UNKNOWN_TOKEN` is fatal and returned, so a
-   supervisor's restart budget applies. Connect and filter creation retry HTTP 408/429/500/502/503/504
+   supervisor's restart budget applies. A refused OAuth refresh is fatal
+   too, as `ErrOAuthSessionEnded`, which also matches `M_UNKNOWN_TOKEN`. Connect and filter creation retry HTTP 408/429/500/502/503/504
    and transport failures; a server Retry-After may extend its wait. It retains
    the filter only for the current Sync call and leaves cursor persistence in
    the underlying store. Initialization/filter/store errors outside those transient
    cases stop Sync.
 5. **Close** only after Sync has returned. Closing the store under a
    running sync fails with "database is closed".
-6. **Logout** logs out on the server first. If the server cannot be
-   reached it changes nothing locally, so the device is not orphaned.
-   Then it clears the session and removes `StateDir`.
+6. **Logout** logs out on the server first, or revokes the tokens at the
+   issuer for an OAuth session. If the server cannot be reached it changes
+   nothing locally, so the device is not orphaned. Then it clears the
+   session and removes `StateDir`.
 
 ## Sync discipline
 
@@ -129,6 +137,7 @@ make application-event storage atomic or repair missing history by itself.
 | `StateDir/sync.lock` | held by the running `Sync`; empty |
 | `SessionStore` (backup) | the key backup's private key and version, when this device has one |
 | `SessionStore` | user id, device id, access token, pickle key; the connector seals it in `config.json` |
+| `SessionStore` (OAuth) | issuer, client id, token and revocation endpoints, refresh token and expiry, for a session from delegated OAuth login; replaced on each token rotation before the new pair is used |
 
 The pickle key encrypts the crypto store's secrets, so the database is
 unreadable without the session store, and the session store is useless
@@ -138,9 +147,17 @@ without the database.
 
 `CreateRecoveryKey` refuses an account that already has a cross-signing
 identity (`ErrIdentityExists`): replacing one breaks every existing
-trust relationship. It creates secret storage and the cross-signing
-keys, then signs this device. `RestoreFromRecoveryKey` fetches the keys
+trust relationship. It generates the cross-signing keys and has the
+server accept them before creating secret storage and storing them there,
+then signs this device. `RestoreFromRecoveryKey` fetches the keys
 with the recovery key and signs this device.
+
+`ResetCrossSigningIdentity` replaces an identity, on explicit request
+only, with the same steps. It answers the server's user-interactive auth
+with the password or with the person's approval on a delegated server's
+account page. Until the server accepts the keys it writes nothing, so a
+refused reset leaves the old identity and recovery key working. See
+[identity reset](identity-reset.md).
 
 `Verification` reads the verdict from the server. `NoIdentity` is kept
 apart from `Unverified` because they want opposite fixes: an account

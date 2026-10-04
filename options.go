@@ -44,6 +44,11 @@ type Options struct {
 	// SyncPolicy controls timeline filtering. The default is SyncPolicyBot.
 	// Both policies retain state/to-device processing and crypto-aware sync.
 	SyncPolicy SyncPolicy
+	// SlidingSync selects an explicit opt-in transport; nil retains classic Sync.
+	SlidingSync *SlidingSyncOptions
+	// SlidingSyncJournal captures full raw sliding responses before dispatch.
+	// It cannot be combined with the classic SyncJournal.
+	SlidingSyncJournal SlidingSyncJournal
 	// SyncJournal, when set, durably captures each raw response before timeline
 	// filtering/crypto dispatch and before its cursor is committed. The callback
 	// runs on the sync owner and must honor cancellation, bound writes, and return
@@ -63,7 +68,16 @@ type Options struct {
 	// Login is used only when Sessions holds no session. Open then logs
 	// in, which touches the network, and saves the new session.
 	Login *mautrix.ReqLogin
-	// DeviceName is the display name given to a new device at login.
+	// OAuthLogin is an accepted delegated OAuth authorization. Like Login,
+	// it is used only when Sessions holds no session; Open then exchanges
+	// its code, confirms the device and saves the session, including the
+	// refresh token, before returning. It cannot be combined with Login. When
+	// it is used, it must come from DiscoverOAuth on this Homeserver; Open
+	// checks that before any request. It is single-use.
+	OAuthLogin *OAuthLogin
+	// DeviceName is the display name given to a new device at classic
+	// login. An OAuth device is named by the issuer, usually after the
+	// registered client name.
 	DeviceName string
 	// Logger receives rihma's and mautrix's logs. It never receives
 	// tokens, keys, or message content from rihma. HTTP diagnostic request
@@ -87,6 +101,18 @@ type Options struct {
 var ErrNoSession = errors.New("rihma: no stored session and no login given")
 
 func (o *Options) validate() error {
+	if o.SlidingSync != nil {
+		if o.SyncJournal != nil {
+			return ErrSlidingUnsupported
+		}
+		copy, err := o.SlidingSync.copied()
+		if err != nil {
+			return err
+		}
+		o.SlidingSync = copy
+	} else if o.SlidingSyncJournal != nil {
+		return ErrSlidingUnsupported
+	}
 	if o.SyncPolicy != SyncPolicyBot && o.SyncPolicy != SyncPolicyFullClient {
 		return ErrInvalidSyncPolicy
 	}
@@ -97,6 +123,8 @@ func (o *Options) validate() error {
 		return errors.New("rihma: Options.StateDir is required")
 	case o.Sessions == nil:
 		return errors.New("rihma: Options.Sessions is required")
+	case o.Login != nil && o.OAuthLogin != nil:
+		return errors.New("rihma: Options.Login and Options.OAuthLogin are exclusive")
 	}
 	if o.UTDWindow == 0 {
 		o.UTDWindow = time.Minute
