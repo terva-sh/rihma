@@ -6,6 +6,23 @@ tracker.
 
 ## Unreleased
 
+## v0.1.7
+
+- Devices keep the account's cross-signing private keys across restarts, in
+  the crypto store under the pickle key, and drop them once another device
+  resets the identity. `RequestCrossSigningKeys` gets them from the account's
+  other verified devices after verification, so a device verified by SAS can
+  verify the next one; `HasCrossSigningKeys` reports whether it can.
+  `ErrCrossSigningKeysNotShared` reports that no device answered in time.
+  Devices holding the keys share them with the account's cross-signed devices
+  on request, as other clients do.
+- `RequestKeyBackup` gets the key backup key from the account's other verified
+  devices after verification (`m.secret.request`), checks it against the
+  server's latest backup, and restores the backup, so a verified device reads
+  history without the recovery key. `ErrBackupKeyNotShared` reports that no
+  device answered in time. Devices holding the backup key now keep it where
+  mautrix answers such requests from the account's cross-signed devices.
+
 ## v0.1.6
 
 - Applications can opt into the experimental Synapse Sliding Sync dialect with
