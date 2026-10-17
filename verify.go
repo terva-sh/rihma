@@ -59,8 +59,17 @@ func (c *Client) RestoreFromRecoveryKey(ctx context.Context, recoveryKey string)
 	if err := c.Connect(ctx); err != nil {
 		return err
 	}
-	if err := c.OlmMachine().VerifyWithRecoveryKey(ctx, recoveryKey); err != nil {
+	mach := c.OlmMachine()
+	if err := mach.VerifyWithRecoveryKey(ctx, recoveryKey); err != nil {
 		return fmt.Errorf("rihma: restore from recovery key: %w", err)
+	}
+	// Secret storage can hold keys another client has since replaced; keep
+	// and share only the published identity. The device is verified either
+	// way; without this it just forgets the keys on restart.
+	if published, err := c.publishedCrossSigningKeys(ctx); err != nil || published == nil || *mach.CrossSigningKeys.PublicKeys() != *published {
+		c.opts.Logger.Warn().Msg("the recovered cross-signing keys could not be checked; not keeping them")
+	} else if err := c.storeCrossSigningSecrets(ctx, mach); err != nil {
+		c.opts.Logger.Warn().Err(err).Msg("cannot keep the cross-signing keys on this device")
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package rihma
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 
@@ -57,5 +58,26 @@ func TestBackupSessionDataRoundTrip(t *testing.T) {
 	other, _ := backup.NewMegolmBackupKey()
 	if _, err := enc.Decrypt(other); err == nil {
 		t.Fatal("another backup key decrypted the session")
+	}
+}
+
+// Other clients send the backup key as unpadded base64; tolerate padding and
+// surrounding space, and refuse anything that is not a 32-byte key.
+func TestParseBackupSecret(t *testing.T) {
+	key, err := backup.NewMegolmBackupKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := base64.RawStdEncoding.EncodeToString(key.Bytes())
+	for _, secret := range []string{raw, base64.StdEncoding.EncodeToString(key.Bytes()), " " + raw + "\n"} {
+		got, ok := parseBackupSecret(secret)
+		if !ok || backupPublicKey(got) != backupPublicKey(key) {
+			t.Fatal("a well-formed backup key was refused")
+		}
+	}
+	for _, secret := range []string{"", "not base64!", base64.RawStdEncoding.EncodeToString([]byte("short"))} {
+		if _, ok := parseBackupSecret(secret); ok {
+			t.Fatal("a malformed backup key was accepted")
+		}
 	}
 }

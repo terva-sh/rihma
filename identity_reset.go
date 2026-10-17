@@ -143,6 +143,10 @@ func (c *Client) bootstrapIdentity(ctx context.Context, auth CrossSigningAuth, r
 	if err := c.signSelf(ctx); err != nil {
 		return "", fmt.Errorf("%w: %w", ErrIdentityIncomplete, err)
 	}
+	// The identity works without this; the device just forgets the keys on restart.
+	if err := c.storeCrossSigningSecrets(ctx, mach); err != nil {
+		c.opts.Logger.Warn().Err(err).Msg("cannot keep the cross-signing keys on this device")
+	}
 	return storageKey.RecoveryKey(), nil
 }
 

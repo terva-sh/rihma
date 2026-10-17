@@ -1138,7 +1138,7 @@ func TestSessionWritesAreSerialized(t *testing.T) {
 	gate := make(chan struct{})
 	store.gate.Store(&gate)
 	backupDone := make(chan error, 1)
-	go func() { backupDone <- c.useBackup(ctx, key, "7") }()
+	go func() { backupDone <- c.useBackup(ctx, nil, key, "7") }()
 	for store.gate.Load() != nil {
 		time.Sleep(time.Millisecond)
 	}

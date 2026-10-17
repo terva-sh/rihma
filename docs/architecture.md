@@ -159,6 +159,17 @@ account page. Until the server accepts the keys it writes nothing, so a
 refused reset leaves the old identity and recovery key working. See
 [identity reset](identity-reset.md).
 
+A device that creates, restores or receives the identity keeps its three
+cross-signing private keys in the crypto store, encrypted with the pickle
+key. Connect loads them only while the server still publishes their public
+halves, and deletes keys from before another device's reset. With them, a
+device signs the devices it verifies by SAS. `RequestCrossSigningKeys` gets
+them from the account's other verified devices after verification
+(`m.secret.request`), checking each against the published key, and
+`HasCrossSigningKeys` reports whether this device holds them. Keys in the
+store are also what mautrix shares with the account's cross-signed
+devices on request.
+
 `Verification` reads the verdict from the server. `NoIdentity` is kept
 apart from `Unverified` because they want opposite fixes: an account
 with no identity needs one created, and no emoji verification can help.
@@ -187,6 +198,16 @@ recovery.
   - reads the key back from secret storage;
   - verifies the latest version against it;
   - imports every key, then keeps uploading to that version.
+- `RequestKeyBackup`, called once this device is verified, gets the same
+  key without the recovery key. It sends `m.secret.request` for
+  `m.megolm_backup.v1` to the account's other devices, accepts only a key
+  whose public half matches the server's latest backup, then restores as
+  `RestoreKeyBackup` does. A device that has not yet seen the requester
+  verified drops the request, so it repeats every 15 s until the caller's
+  wait ends (`ErrBackupKeyNotShared`).
+- Every device holding the backup key also keeps it in the crypto store,
+  where mautrix answers secret requests from the account's
+  cross-signed devices, so rihma devices share it the same way.
 - The uploader runs inside `Sync`. It wakes after each sync response and
   every 30 s, and uploads every stored room key not yet in the current
   version, 100 per request. That includes the inbound copies of the

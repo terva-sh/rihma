@@ -77,5 +77,8 @@ Device trust and key recovery use the existing `Verification`,
 an existing backup. `ResetCrossSigningIdentity` replaces an identity only when
 the person asks, typically after losing the recovery key; see
 [identity reset](identity-reset.md). SAS success is not a claim that historical room keys are
-available: restore the existing key backup separately. Recovery keys are
+available. After it, `RequestKeyBackup` asks the account's other verified
+devices for the key backup key, and `RequestCrossSigningKeys` for the
+cross-signing keys, which let this device verify the next one. If none
+answers, the recovery key restores both instead. Recovery keys are
 transient secret command input and must never enter UI snapshots or logs.

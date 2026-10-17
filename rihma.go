@@ -33,6 +33,7 @@ type Client struct {
 	session      Session // as last saved; reads also take backup.mu
 	sessionSaved bool
 	backup       backupState
+	xsign        crossSigningState
 	db           *dbutil.Database
 	helper       *cryptohelper.CryptoHelper
 	managed      managedCryptoBackground
@@ -232,6 +233,20 @@ func (c *Client) Connect(ctx context.Context) error {
 		}
 		c.syncer.installHooks(c)
 		c.cryptoReady = true
+		// Stored cross-signing keys are loaded only while the server still
+		// publishes them; a device that cannot sign still syncs.
+		if err := c.loadCrossSigningSecrets(ctx, c.helper.Machine(), c.publishedCrossSigningKeys); err != nil {
+			c.opts.Logger.Warn().Err(err).Msg("cannot load this device's cross-signing keys")
+		}
+		// Devices that adopted the backup before rihma shared it offer it now.
+		c.backup.mu.Lock()
+		key := c.backup.key
+		c.backup.mu.Unlock()
+		if key != nil {
+			if err := storeBackupSecret(ctx, c.helper.Machine(), key); err != nil {
+				c.opts.Logger.Warn().Err(err).Msg("cannot offer the backup key to verified devices")
+			}
+		}
 	}
 	if c.sas != nil {
 		if err := c.sas.init(ctx); err != nil {

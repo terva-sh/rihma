@@ -109,7 +109,7 @@ func (c *Client) EnableKeyBackup(ctx context.Context, recoveryKey string) error 
 	if err := mach.SSSS.SetEncryptedAccountData(ctx, event.AccountDataMegolmBackupKey, key.Bytes(), ssssKey); err != nil {
 		return fmt.Errorf("rihma: store backup key in secret storage: %w", err)
 	}
-	return c.useBackup(ctx, key, resp.Version)
+	return c.useBackup(ctx, mach, key, resp.Version)
 }
 
 // RestoreKeyBackup reads the backup key from secret storage with the
@@ -143,10 +143,11 @@ func (c *Client) RestoreKeyBackup(ctx context.Context, recoveryKey string) error
 	if version == "" {
 		return nil
 	}
-	return c.useBackup(ctx, key, version)
+	return c.useBackup(ctx, mach, key, version)
 }
 
-func (c *Client) useBackup(ctx context.Context, key *backup.MegolmBackupKey, version id.KeyBackupVersion) error {
+// mach, when crypto is running, also gets the key to share with verified devices.
+func (c *Client) useBackup(ctx context.Context, mach *crypto.OlmMachine, key *backup.MegolmBackupKey, version id.KeyBackupVersion) error {
 	// Hold the session writer lock across the save so a concurrent OAuth
 	// token rotation is neither lost nor overwritten with an older pair.
 	c.sessionMu.Lock()
@@ -162,6 +163,10 @@ func (c *Client) useBackup(ctx context.Context, key *backup.MegolmBackupKey, ver
 	c.session, c.backup.key, c.backup.stopped = next, key, false
 	c.backup.mu.Unlock()
 	c.wakeBackup()
+	// The backup is adopted; a device that cannot share its key still works.
+	if err := storeBackupSecret(ctx, mach, key); err != nil {
+		c.opts.Logger.Warn().Err(err).Msg("cannot offer the backup key to verified devices")
+	}
 	return nil
 }
 
