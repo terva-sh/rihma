@@ -11,6 +11,8 @@ import (
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 	"terva.sh/terva/packages/agent/connsdk"
+
+	"terva.sh/rihma"
 )
 
 func eventOf(t *testing.T, typ event.Type, evtID id.EventID, sender id.UserID, content string) *event.Event {
@@ -26,7 +28,7 @@ func eventOf(t *testing.T, typ event.Type, evtID id.EventID, sender id.UserID, c
 // newTestTransport has no client. Every server read fails, so unknown
 // events are room-scoped and thread titles empty.
 func newTestTransport() *transport {
-	tr := &transport{self: "@bot:hs", nameLoaded: true, name: "Bot", events: newChatEvents(), asks: newAsks(), threads: newThreads(), log: zerolog.Nop()}
+	tr := &transport{self: "@bot:hs", nameLoaded: true, name: "Bot", events: newChatEvents(), asks: rihma.NewAsks(nil, "@bot:hs", zerolog.Nop()), threads: newThreads(), log: zerolog.Nop()}
 	tr.threads.fetchRoot = func(context.Context, id.RoomID, id.EventID) (id.EventID, bool) { return "", false }
 	tr.threads.fetchTitle = func(context.Context, id.RoomID, id.EventID) (string, error) { return "", errors.New("no server") }
 	return tr

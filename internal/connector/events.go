@@ -167,7 +167,7 @@ func (t *transport) handleReaction(ctx context.Context, evt *event.Event) {
 	if rel.Type != event.RelAnnotation || rel.EventID == "" {
 		return
 	}
-	if t.tryAnswer(evt) {
+	if t.asks.HandleReaction(evt) {
 		return
 	}
 	r := connsdk.Reaction{
@@ -192,7 +192,7 @@ func (t *transport) handleRedaction(ctx context.Context, evt *event.Event) {
 	if target == "" {
 		return
 	}
-	if _, ok := t.asks.answerEvents.take(target); ok {
+	if t.asks.TakeAnswerRedaction(target) {
 		return // an un-tap; the protocol has no answer retraction
 	}
 	if r, ok := t.events.seen.take(target); ok {

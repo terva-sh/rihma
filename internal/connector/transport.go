@@ -63,7 +63,7 @@ type transport struct {
 	titles  titles
 	members *membership
 	events  *chatEvents
-	asks    *asks
+	asks    *rihma.Asks
 	threads *threads
 	avatars *boundedMap[avatarKey, id.ContentURIString]
 	dataDir string // the host's, for inbound attachments
@@ -101,9 +101,8 @@ func NewTransport(s connsdk.Session) (connsdk.Transport, error) {
 	if !cfg.configured() {
 		return nil, errors.New("not configured — run `terva bot setup --connector rihma` first")
 	}
-	t := &transport{cfg: cfg, members: newMembership(), events: newChatEvents(), asks: newAsks(), threads: newThreads(), avatars: newBoundedMap[avatarKey, id.ContentURIString](avatarCacheSize), dataDir: s.DataDir, log: logger()}
+	t := &transport{cfg: cfg, members: newMembership(), events: newChatEvents(), threads: newThreads(), avatars: newBoundedMap[avatarKey, id.ContentURIString](avatarCacheSize), dataDir: s.DataDir, log: logger()}
 	t.notices = newOperatorNotices(s.Warn, t.log)
-	t.asks.refuse = t.redactRefused
 	t.threads.fetchRoot, t.threads.fetchTitle = t.fetchScope, t.readTitle
 	return t, nil
 }
@@ -116,7 +115,7 @@ func (t *transport) Connect(ctx context.Context) (connsdk.Identity, error) {
 	if err != nil {
 		return connsdk.Identity{}, err
 	}
-	t.client, t.self = client, client.UserID
+	t.client, t.self, t.asks = client, client.UserID, client.Asks()
 	return connsdk.Identity{ID: client.UserID.String(), Username: localpart(client.UserID)}, nil
 }
 
@@ -126,8 +125,7 @@ func (t *transport) Connect(ctx context.Context) (connsdk.Identity, error) {
 func (t *transport) Receive(ctx context.Context, deliver func(connsdk.Message)) error {
 	t.registerHandlers(deliver)
 	err := t.client.Sync(ctx)
-	t.asks.shutdown()
-	t.client.Close()
+	t.client.Close() // shuts down the asks too
 	if ctx.Err() != nil {
 		return nil
 	}

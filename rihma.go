@@ -47,6 +47,8 @@ type Client struct {
 	sas         *SASController
 	slidingMu   sync.RWMutex
 	slidingView *SlidingSyncView
+	asksOnce    sync.Once
+	asks        *Asks
 }
 
 const storeFile = "rihma.db"
@@ -270,6 +272,7 @@ func (c *Client) Close() error {
 	if c.sas != nil {
 		c.sas.stop()
 	}
+	c.Asks().Shutdown()
 	c.utd.stop()
 	return c.helper.Close()
 }

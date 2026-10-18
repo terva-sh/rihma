@@ -2,57 +2,69 @@ package connector
 
 import (
 	"context"
-	"slices"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 	"terva.sh/terva/packages/agent/connsdk"
+
+	"terva.sh/rihma"
 )
 
-func opt(key, label, hint string) connsdk.AskOption {
-	return connsdk.AskOption{Key: key, Label: label, Hint: hint}
+// The widget itself is rihma's and tested there; these tests cover the
+// connector's part: translating asks and answers, and keeping widget
+// taps out of the reaction stream.
+
+// widgetSender posts the widget as $ask and its seeds as $seed.
+type widgetSender struct{}
+
+func (widgetSender) SendMessageEvent(context.Context, id.RoomID, event.Type, any, ...mautrix.ReqSendEvent) (*mautrix.RespSendEvent, error) {
+	return &mautrix.RespSendEvent{EventID: "$ask"}, nil
 }
 
-// terva-conn-matrix's asks.rs cases.
-func TestAssignEmojis(t *testing.T) {
-	for _, c := range []struct {
-		name    string
-		options []connsdk.AskOption
-		want    []string
-	}{
-		{"hints win and fallbacks fill gaps", []connsdk.AskOption{opt("approve", "Approve", "👍"), opt("deny", "Deny", ""), opt("later", "Later", "👍")}, []string{"👍", "①", "②"}},
-		{"variation selector and spaces stripped", []connsdk.AskOption{opt("a", "A", " 👍️ ")}, []string{"👍"}},
-		{"a hint equal to a used digit falls back", []connsdk.AskOption{opt("a", "A", ""), opt("b", "B", "①")}, []string{"①", "②"}},
+func (widgetSender) SendReaction(context.Context, id.RoomID, id.EventID, string) (*mautrix.RespSendEvent, error) {
+	return &mautrix.RespSendEvent{EventID: "$seed"}, nil
+}
+
+func (widgetSender) RedactEvent(context.Context, id.RoomID, id.EventID, ...mautrix.ReqRedact) (*mautrix.RespSendEvent, error) {
+	return &mautrix.RespSendEvent{EventID: "$redaction"}, nil
+}
+
+func TestRihmaAsk(t *testing.T) {
+	rel := (&event.RelatesTo{}).SetThread("$root", "$root")
+	a := connsdk.Ask{
+		ID: "ask-1", ChatID: "!room:hs", Text: "Deploy?",
+		Options:    []connsdk.AskOption{{Key: "approve", Label: "Approve", Style: "affirm", Hint: "👍", Recommended: true}},
+		RestrictTo: []string{"@owner:hs"}, Expires: time.Minute,
+	}
+	want := rihma.Ask{
+		ID: "ask-1", Room: "!room:hs", Text: "Deploy?", RelatesTo: rel,
+		Options:    []rihma.AskOption{{Key: "approve", Label: "Approve", Hint: "👍"}},
+		RestrictTo: []id.UserID{"@owner:hs"}, Expires: 50 * time.Second,
+	}
+	if got := rihmaAsk(a, "!room:hs", rel, 10*time.Second); !reflect.DeepEqual(got, want) {
+		t.Fatalf("rihmaAsk:\n got %+v\nwant %+v", got, want)
+	}
+
+	// The deadline is the command's: a floor of a second, less the time
+	// already spent, once. An overdue ask still expires rather than
+	// turning into one that never does.
+	for _, c := range []struct{ expires, elapsed, want time.Duration }{
+		{time.Second, 900 * time.Millisecond, 100 * time.Millisecond},
+		{500 * time.Millisecond, 0, time.Second},
+		{500 * time.Millisecond, 300 * time.Millisecond, 700 * time.Millisecond},
+		{time.Second, 2 * time.Second, time.Nanosecond},
+		{0, time.Second, 0},
 	} {
-		if got := assignEmojis(c.options); !slices.Equal(got, c.want) {
-			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		a.Expires = c.expires
+		if got := rihmaAsk(a, "!room:hs", nil, c.elapsed).Expires; got != c.want {
+			t.Errorf("Expires %s after %s = %s, want %s", c.expires, c.elapsed, got, c.want)
 		}
 	}
-	var many []connsdk.AskOption
-	for range 22 {
-		many = append(many, opt("k", "L", ""))
-	}
-	got := assignEmojis(many)
-	if got[0] != "①" || got[19] != "⑳" || got[20] != "⑳" || got[21] != "⑳" {
-		t.Fatalf("past twenty: %q", got)
-	}
-}
-
-func TestRenderAsk(t *testing.T) {
-	options := []connsdk.AskOption{opt("approve", "Approve", "👍"), opt("deny", "Deny", "")}
-	if got, want := renderAsk("Run it?", options, assignEmojis(options)), "Run it?\n\n- 👍 Approve\n- ① Deny\n"; got != want {
-		t.Fatalf("%q, want %q", got, want)
-	}
-}
-
-// openAsk registers an ask on $ask without a client.
-func openAsk(tr *transport, askID string, restrictTo []string, got *[]connsdk.Answer) *askState {
-	s := &askState{room: "!room:hs", message: "$ask", text: "Deploy?", emojis: []string{"👍", "①"}, keys: []string{"approve", "deny"},
-		restrictTo: restrictTo, deliver: func(a connsdk.Answer) { *got = append(*got, a) }}
-	tr.asks.add(askID, s)
-	return s
 }
 
 func tap(t *testing.T, evtID id.EventID, sender id.UserID, target, key string) *event.Event {
@@ -71,13 +83,16 @@ func noFrame(t *testing.T, tr *transport, what string) {
 func TestAnswerRouting(t *testing.T) {
 	ctx := context.Background()
 	tr := newTestTransport()
-	refused := make(chan id.EventID, 4)
-	tr.asks.refuse = func(_ id.RoomID, e id.EventID) { refused <- e }
+	tr.asks = rihma.NewAsks(widgetSender{}, "@bot:hs", zerolog.Nop())
 	var answers []connsdk.Answer
-	s := openAsk(tr, "ask-1", []string{"@owner:hs"}, &answers)
+	ask := rihmaAsk(connsdk.Ask{ID: "ask-1", Text: "Deploy?",
+		Options:    []connsdk.AskOption{{Key: "approve", Label: "Approve", Hint: "👍"}, {Key: "deny", Label: "Deny"}},
+		RestrictTo: []string{"@owner:hs"}}, "!room:hs", nil, 0)
+	if _, err := tr.asks.Open(ctx, ask, func(ans rihma.AskAnswer) { answers = append(answers, answerOf(ans)) }); err != nil {
+		t.Fatal(err)
+	}
 
-	// The owner's tap is one attested answer and no reaction frame; a
-	// variation selector does not matter.
+	// The owner's tap is one attested answer and no reaction frame.
 	tr.handleReaction(ctx, tap(t, "$t1", "@owner:hs", "$ask", "👍️"))
 	want := connsdk.Answer{AskID: "ask-1", Key: "approve", UserID: "@owner:hs", Username: "owner", Attestation: "attested"}
 	if len(answers) != 1 || answers[0] != want {
@@ -91,20 +106,11 @@ func TestAnswerRouting(t *testing.T) {
 	tr.handleRedaction(ctx, red)
 	noFrame(t, tr, "an un-tap")
 
-	// A near-miss MXID is outside RestrictTo: no answer, no frame, and
-	// the tap is redacted; its redaction is swallowed too.
+	// A tap from outside RestrictTo is swallowed too.
 	tr.handleReaction(ctx, tap(t, "$t2", "@owner:hs.evil", "$ask", "①"))
+	noFrame(t, tr, "an imposter tap")
 	if len(answers) != 1 {
 		t.Fatalf("an imposter answered: %+v", answers)
-	}
-	noFrame(t, tr, "an imposter tap")
-	select {
-	case e := <-refused:
-		if e != "$t2" {
-			t.Fatalf("refused %s", e)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("the imposter tap was not redacted")
 	}
 
 	// Another emoji on the widget is a plain reaction.
@@ -113,72 +119,21 @@ func TestAnswerRouting(t *testing.T) {
 		t.Fatalf("other emoji = %+v", r)
 	}
 
-	// An expired ask answers nothing; its taps are plain reactions.
-	s.expired = true
+	// After CloseAsk a tap is a plain reaction.
+	if err := tr.CloseAsk(ctx, "ask-1", ""); err != nil {
+		t.Fatal(err)
+	}
 	tr.handleReaction(ctx, tap(t, "$t4", "@owner:hs", "$ask", "👍"))
-	if r := next(t, tr).reaction; r == nil || r.Key != "👍" || len(answers) != 1 {
-		t.Fatalf("tap on an expired ask = %+v, answers %+v", r, answers)
-	}
-
-	// So does a closed one.
-	s.expired = false
-	if tr.asks.remove("ask-1") != s {
-		t.Fatal("remove did not return the open ask")
-	}
-	tr.handleReaction(ctx, tap(t, "$t5", "@owner:hs", "$ask", "👍"))
 	if r := next(t, tr).reaction; r == nil || len(answers) != 1 {
 		t.Fatalf("tap on a closed ask = %+v, answers %+v", r, answers)
 	}
 
-	// Closing it again, or an ask that never existed, succeeds without
-	// touching the network (there is no client here).
-	for _, id := range []string{"ask-1", "never"} {
-		if err := tr.CloseAsk(ctx, id, "Approved"); err != nil {
-			t.Fatalf("close %s: %v", id, err)
-		}
+	// Closing an ask that never existed succeeds without a client, and
+	// before Connect has made the asks at all.
+	if err := newTestTransport().CloseAsk(ctx, "never", "Approved"); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestAnyoneMayAnswerWithoutRestrictTo(t *testing.T) {
-	tr := newTestTransport()
-	var answers []connsdk.Answer
-	openAsk(tr, "ask-1", nil, &answers)
-	tr.handleReaction(context.Background(), tap(t, "$t", "@someone:else", "$ask", "①"))
-	if len(answers) != 1 || answers[0].Key != "deny" || answers[0].UserID != "@someone:else" {
-		t.Fatalf("answers = %+v", answers)
-	}
-}
-
-func TestOpenAsksAreBounded(t *testing.T) {
-	a := newAsks()
-	first := &askState{timer: time.AfterFunc(time.Hour, func() { t.Error("an evicted ask's timer fired") })}
-	a.add("first", first)
-	for i := range maxOpenAsks {
-		a.add(string(rune('a'+i%26))+string(rune(i)), &askState{})
-	}
-	if _, ok := a.open["first"]; ok || len(a.open) != maxOpenAsks || len(a.order) != maxOpenAsks {
-		t.Fatalf("open = %d, order = %d, first kept = %v", len(a.open), len(a.order), ok)
-	}
-	if first.timer.Stop() {
-		t.Fatal("evicting the ask left its timer running")
-	}
-
-	// Re-adding an id replaces it rather than leaving a second entry.
-	b := newAsks()
-	old := &askState{timer: time.AfterFunc(time.Hour, func() {})}
-	b.add("x", old)
-	b.add("x", &askState{})
-	if len(b.order) != 1 || old.timer.Stop() {
-		t.Fatalf("order = %v; old timer still running = %v", b.order, !old.timer.Stop())
-	}
-}
-
-func TestShutdownStopsTimers(t *testing.T) {
-	a := newAsks()
-	s := &askState{timer: time.AfterFunc(time.Hour, func() {})}
-	a.add("x", s)
-	a.shutdown()
-	if s.timer.Stop() || !a.done {
-		t.Fatal("shutdown left a timer running")
+	if err := (&transport{}).CloseAsk(ctx, "never", "Approved"); err != nil {
+		t.Fatal(err)
 	}
 }
