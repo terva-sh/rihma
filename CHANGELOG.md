@@ -6,6 +6,18 @@ tracker.
 
 ## Unreleased
 
+## v0.1.8
+
+- `Client.Asks` is the reaction ask widget the connector used, now in the
+  library (TKT-01M584CG8YS7NGPH96XCW6PC5Y). `Asks.Open` posts a question
+  with an emoji legend and seeds one reaction per option; `HandleReaction`,
+  called from the program's own reaction handler, delivers taps from the
+  users in `RestrictTo` and redacts the rest; `Close` withdraws the seeds
+  and edits in the outcome. `Wait` blocks for the first answer and reports
+  `ErrAskExpired` or `ErrAskClosed` when none came. `NewAsks` builds a set
+  over any `AskSender`, for programs that hold no `Client` yet. The
+  connector's asks behave as before.
+
 ## v0.1.7
 
 - Devices keep the account's cross-signing private keys across restarts, in
