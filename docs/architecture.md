@@ -226,7 +226,9 @@ recovery.
   is checked at the end; on any error the caller discards what it got.
 - **Upload.** `SendMedia` encrypts the file when the room is encrypted
   and sends it with Matrix v1.10 captions: with a caption, `body` is the
-  caption and `filename` the name.
+  caption and `filename` the name. `Media.TransactionID` sets the send's
+  transaction id, so a resend after a restart returns the first event
+  instead of posting a second; the upload itself repeats.
 - **The connector** downloads into the host's `data_dir` under a
   temporary name and renames it into place only when complete, because
   the host reads the path as soon as the frame arrives. A file that

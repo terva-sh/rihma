@@ -77,11 +77,20 @@ type Media struct {
 	Caption  string            // "" for none
 	// RelatesTo threads or replies the message; nil for neither.
 	RelatesTo *event.RelatesTo
+	// TransactionID makes the send idempotent: the homeserver answers a
+	// repeated id from the same device with the event it first sent,
+	// instead of posting another. In an encrypted room it applies to the
+	// encrypted event. "" uses a fresh id for every send.
+	//
+	// It covers the event, not the upload. A resend uploads the file
+	// again, and that second copy is left unreferenced.
+	TransactionID string
 }
 
 // SendMedia uploads a file and sends it to room, encrypting the file
 // first when the room is encrypted. With a caption it uses the Matrix
-// v1.10 form: body is the caption and filename the name.
+// v1.10 form: body is the caption and filename the name. Set
+// m.TransactionID to make a resend return the first event.
 func (c *Client) SendMedia(ctx context.Context, room id.RoomID, m Media) (id.EventID, error) {
 	if err := c.Connect(ctx); err != nil {
 		return "", err
@@ -113,7 +122,7 @@ func (c *Client) SendMedia(ctx context.Context, room id.RoomID, m Media) (id.Eve
 	} else {
 		content.URL = up.ContentURI.CUString()
 	}
-	resp, err := c.SendMessageEvent(ctx, room, event.EventMessage, content)
+	resp, err := c.SendMessageEvent(ctx, room, event.EventMessage, content, mautrix.ReqSendEvent{TransactionID: m.TransactionID})
 	if err != nil {
 		return "", fmt.Errorf("rihma: send: %w", err)
 	}
