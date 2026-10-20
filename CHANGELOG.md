@@ -6,6 +6,15 @@ tracker.
 
 ## Unreleased
 
+## v0.1.9
+
+- `Media.TransactionID` makes `SendMedia` idempotent
+  (TKT-01M5ANJ3RY2MAK49P0Q2HS2PWW). The homeserver answers a repeated id
+  from the same device with the first event rather than posting another;
+  in an encrypted room the id applies to the encrypted event. A resend
+  still uploads the file again, and that copy is left unreferenced. An
+  empty id keeps a fresh one per send, as before.
+
 ## v0.1.8
 
 - `Client.Asks` is the reaction ask widget the connector used, now in the
