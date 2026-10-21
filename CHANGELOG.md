@@ -6,6 +6,23 @@ tracker.
 
 ## Unreleased
 
+## v0.1.10
+
+- `SignUserIdentity` signs another user's master key with this account's
+  user-signing key, but only when the key the homeserver publishes at that
+  moment is the one the caller expects
+  (TKT-01M5FZ7HWFDH1GM30FGC23ASS2). Each refusal is its own sentinel:
+  `ErrOwnUser`, `ErrNoCrossSigningKeys`, `ErrNoUserIdentity`, and
+  `ErrMasterKeyMismatch`. A key the account has already signed is not
+  uploaded again, and afterwards the user's cross-signed devices are
+  trusted. `UserIdentity` reads a user's published master key, and whether
+  this account's signature on it is valid. `OwnMasterKey` returns the
+  master key this device holds once the server still publishes it.
+  `Options.OnIdentityChange` reports, once per key, a signed user's new
+  master key; rihma never signs it on its own. mautrix's log lines that
+  carry signatures are now dropped, including those from signing this
+  device. See docs/user-identity.md.
+
 ## v0.1.9
 
 - `Media.TransactionID` makes `SendMedia` idempotent
