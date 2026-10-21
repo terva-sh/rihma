@@ -75,6 +75,9 @@ func (s *syncer) installHooks(c *Client) {
 		// response may be stored just after the uploader looks; the next
 		// response or the uploader's timer picks it up.
 		c.wakeBackup()
+		// The crypto machine's hook, which runs first, has just fetched the
+		// keys of users whose devices changed.
+		c.checkIdentityChanges(ctx, resp.DeviceLists.Changed)
 		return true
 	})
 }

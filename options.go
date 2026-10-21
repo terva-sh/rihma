@@ -94,6 +94,14 @@ type Options struct {
 	// A persistent outage may call it repeatedly; callers should rate-limit
 	// operator notices. Fatal errors and cancellation do not call it.
 	OnSyncRetry func()
+	// OnIdentityChange, if set, is told when a user whose master key this
+	// account signed publishes a different one, once per new key, even
+	// across restarts; only a key the store failed to record can be
+	// reported again, once, after a restart. It runs on the goroutine that noticed: the sync
+	// goroutine, or the caller of UserIdentity or SignUserIdentity. It
+	// must not block. rihma logs a warning either way and never signs the
+	// new key; SignUserIdentity does, when the caller has checked it.
+	OnIdentityChange func(IdentityChange)
 }
 
 // ErrNoSession is returned by Open when there is no stored session and

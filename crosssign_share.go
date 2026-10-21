@@ -248,12 +248,18 @@ func (c *Client) publishedCrossSigningKeys(ctx context.Context) (*crypto.CrossSi
 	if err != nil {
 		return nil, fmt.Errorf("rihma: query own keys: %w", err)
 	}
-	master, self, user := resp.MasterKeys[c.UserID], resp.SelfSigningKeys[c.UserID], resp.UserSigningKeys[c.UserID]
+	return crossSigningKeysIn(resp, c.UserID), nil
+}
+
+// crossSigningKeysIn returns the cross-signing public keys a query response
+// publishes for userID, or nil when they are not a complete identity.
+func crossSigningKeysIn(resp *mautrix.RespQueryKeys, userID id.UserID) *crypto.CrossSigningPublicKeysCache {
+	master, self, user := resp.MasterKeys[userID], resp.SelfSigningKeys[userID], resp.UserSigningKeys[userID]
 	keys := &crypto.CrossSigningPublicKeysCache{MasterKey: master.FirstKey(), SelfSigningKey: self.FirstKey(), UserSigningKey: user.FirstKey()}
 	if keys.MasterKey == "" || keys.SelfSigningKey == "" || keys.UserSigningKey == "" {
-		return nil, nil
+		return nil
 	}
-	return keys, nil
+	return keys
 }
 
 func publishedKey(keys *crypto.CrossSigningPublicKeysCache, usage id.CrossSigningUsage) id.Ed25519 {

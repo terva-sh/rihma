@@ -50,6 +50,11 @@ server with the account password or, on a homeserver that delegates accounts to
 an OAuth 2.0 server, with the person's approval on its account page; see
 [identity reset](docs/identity-reset.md).
 
+A client holding its account's cross-signing keys can vouch for another user.
+It signs that user's master key only when the homeserver still publishes the
+key the caller expects, and it reports a signed user's later key change; see
+[signing another user's identity](docs/user-identity.md).
+
 rihma builds only without cgo and on mautrix's pure-Go Olm backend:
 
 ```sh

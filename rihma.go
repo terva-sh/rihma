@@ -34,6 +34,7 @@ type Client struct {
 	sessionSaved bool
 	backup       backupState
 	xsign        crossSigningState
+	signed       signedIdentities
 	db           *dbutil.Database
 	helper       *cryptohelper.CryptoHelper
 	managed      managedCryptoBackground
@@ -88,7 +89,8 @@ func Open(ctx context.Context, opts Options) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rihma: %w", err)
 	}
-	cli.Log = opts.Logger
+	// mautrix logs the signatures it makes and checks; drop those lines.
+	cli.Log = opts.Logger.Hook(signatureLogFilter{})
 	// mautrix can log ordinary message bodies, and its environment override
 	// also enables sensitive request bodies. Omit diagnostic payloads before
 	// each attempt without changing the request sent to the server.
