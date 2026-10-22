@@ -6,6 +6,42 @@ tracker.
 
 ## Unreleased
 
+## v0.1.11
+
+- `Client.VerifyUser` verifies another user with emoji from a bot that is
+  not running (TKT-01M5GZ5YX2RE67SZG2PXRR70P4). It runs its own Sync,
+  sends the request with `StartUser`, shows the caller's confirm function
+  the emoji, and returns the user's master key once it is signed and
+  recorded. `ErrSASUnsigned` reports a peer whose device did not name
+  their master key. Element answers the request when the bot and the user
+  already share an encrypted room, such as their DM.
+- `SASController.StartUser` verifies another user with emoji over
+  to-device messages (TKT-01M5GZ4TCQVZ2QCGXZQWTZYBB4). It checks that
+  this device holds the account's cross-signing keys and that the user
+  publishes an identity before sending anything, and refuses a user with a
+  device sharing this device's id with the new `ErrPeerDeviceIDConflict`.
+  Follow-ups must come from the attempt's user. When both sides confirm,
+  rihma signs the user's master key, records it for identity-change
+  reports, and publishes done with the new `SASSnapshot.MasterKey`;
+  snapshots also gain `OtherUser` and `Room`, and the reasons `unsigned`
+  and `identity_changed`. The other user's MAC is held until the local
+  person confirms, which works around mautrix v0.31.0 failing to sign the
+  other user when the local side confirms second. See
+  docs/verification.md.
+- `CarryKeyBackup` and `ReplaceKeyBackup` repair the key backup after
+  `ResetCrossSigningIdentity`, given the new recovery key
+  (TKT-01M443MJ2Z1DJ0R7EJYRVAQZ4S). The reset still leaves the backup alone,
+  and the application chooses which repair to make. Carry keeps the backup and
+  its room keys: it stores the backup key under the new recovery key and signs
+  the auth data again with the new master key. It needs the key, so it returns
+  `ErrBackupKeyUnavailable` when neither this device nor secret storage holds
+  it, and `ErrNoKeyBackup` when the account has no backup. Replace deletes the
+  backup and creates a new one, dropping the room keys that only the old one
+  held, and it always works. Both return `ErrNoCrossSigningKeys` unless this
+  device holds the published identity. Each step is ordered so that an
+  interruption leaves a backup some recovery key can read, and running the
+  call again finishes it. See docs/identity-reset.md.
+
 ## v0.1.10
 
 - `SignUserIdentity` signs another user's master key with this account's
