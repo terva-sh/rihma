@@ -31,8 +31,9 @@ confirms completion. The live proof measures this local master-trust signature;
 it does not confuse it with `Client.Verification == Verified`, which additionally
 needs the device's cross-signature. Errors or cancellation after signing cannot
 be promised to undo an already-published signature. The wrong-key regression
-fails before that signing step. Wrong shared secrets and send-failure timing need
-their own failure characterization before a public QR completion contract is set.
+fails before that signing step. [QR verification trust on failure](qr-trust.md)
+measures what wrong shared secrets, failed sends, cancellation, the reverse
+mode and missing keys leave behind, and sets the completion contract.
 
 The upstream QR decoder has a reproduced malformed-length panic: transaction
 length arithmetic remains `uint16` and can wrap before its slice bounds check.
@@ -87,12 +88,15 @@ another transaction cannot select it implicitly. Cancellation and overflow clear
 pending adapter data and dismiss transactions; shutdown quiesces handlers and
 commands before clearing private buffers and closing stores. Caller or controller
 cancellation is not a guarantee that earlier protocol/trust effects were undone.
+The preflight checks, the `TrustChanged` snapshot flag and the failed-send
+rules in [QR verification trust on failure](qr-trust.md) complete this proposal.
 
 ## Remaining implementation
 
 The public controller adapter, upstream parser fix,
-trust timing on failed sends/wrong secrets, the reverse same-account trust mode,
 cross-user verification and QR device authorization/login have separate follow-ups.
+Trust on failed sends and wrong secrets, and the reverse same-account mode, are
+characterized in [QR verification trust on failure](qr-trust.md).
 QR images/cameras, browser/device authorization and recovery are application
 integrations with distinct consent and secret lifetimes. This proof does not
 advertise them as implemented library capabilities.
