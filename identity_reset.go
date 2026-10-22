@@ -103,7 +103,10 @@ type CrossSigningApproval struct {
 // can leave the outcome unknown; run the reset again to settle it.
 //
 // The account's key backup is left alone. Its key stays in secret storage
-// under the old recovery key, which the new one cannot read.
+// under the old recovery key, which the new one cannot read, and the old
+// master key's signature stays on it. Repair it afterwards with the new
+// recovery key: CarryKeyBackup keeps it when its key is at hand, and
+// ReplaceKeyBackup starts a new one.
 func (c *Client) ResetCrossSigningIdentity(ctx context.Context, auth CrossSigningAuth) (string, error) {
 	return c.bootstrapIdentity(ctx, auth, true)
 }

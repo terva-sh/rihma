@@ -106,6 +106,109 @@ outcome is unknown. Run the reset again to settle it.
 start a fresh challenge, rihma therefore publishes again on every attempt. Each
 attempt costs one unauthenticated request and one authenticated one.
 
+## The key backup after a reset
+
+A reset leaves the account's key backup as it was, and that state is a problem.
+The backup's key is still in secret storage, but under the old recovery key, so
+`RestoreKeyBackup` with the new key fails. The old master key signed the
+backup's auth data, so a client that knows only the new identity does not trust
+it. A device that already uploads to the backup carries on, because mautrix
+trusts a backup whose public key matches the key the device holds.
+
+rihma repairs the backup only when the application asks. Call one of two
+functions with the new recovery key:
+
+```go
+key, err := client.ResetCrossSigningIdentity(ctx, auth)
+// Show key to the person, then:
+err = client.CarryKeyBackup(ctx, key)
+if errors.Is(err, rihma.ErrBackupKeyUnavailable) {
+    // Ask the person first: this drops the room keys only the old backup held.
+    err = client.ReplaceKeyBackup(ctx, key)
+}
+```
+
+- `CarryKeyBackup` keeps the backup's version and key, so every room key in it
+  stays readable. It stores the key under the new recovery key and signs the
+  auth data again with the new master key. It needs the backup's key. Either
+  this device uploads to the backup, or secret storage under the new recovery
+  key already holds the key, from an earlier carry that was interrupted. If
+  neither holds, it returns `ErrBackupKeyUnavailable`. On an account without a
+  backup it returns `ErrNoKeyBackup`.
+- `ReplaceKeyBackup` deletes the backup and creates a new one with a new key,
+  as matrix-js-sdk does when it resets encryption. It always works, but every
+  room key that only the old backup held is lost. This device then uploads
+  every room key it holds to the new backup. On an account without a backup it
+  creates one, as `EnableKeyBackup` does.
+
+Both need this device to hold the cross-signing identity that the server
+publishes, and right after a reset it does. Otherwise they return
+`ErrNoCrossSigningKeys`. A recovery key that does not open the account's
+secret storage fails too. All of these refusals happen before anything is
+written.
+
+Carry signs the auth data as the server holds it. It keeps every field and
+replaces this account's signatures with the new master key's. The old
+signatures came from the old identity and from devices trusted through it, and
+clients no longer trust either.
+
+After a carry, other devices keep uploading to the same backup. After a
+replace, they stop. Each one adopts the new backup with `RestoreKeyBackup` and
+the new recovery key, or with `RequestKeyBackup` once it is verified again.
+
+### What an interruption leaves
+
+The steps are ordered so that at every point some recovery key can read the
+latest backup, or the latest backup is still empty. No room key goes into a
+backup whose key no recovery key can read. Every failure returns an error, and
+running the same call again finishes the work.
+
+An error does not always mean the server refused a write. A write can land and
+its answer can still be lost. The states below allow for that.
+
+`CarryKeyBackup`:
+
+1. It stores the backup's key under the new recovery key. If this fails, the
+   backup is as it was, or the key is stored and the state is as at step 2.
+2. It signs the auth data with the new master key and stores it on the server.
+   If this fails, the new recovery key already restores the backup, because
+   `RestoreKeyBackup` trusts a backup whose public key matches the key it
+   reads. A client that checks the signature does not trust the backup yet.
+   Run `CarryKeyBackup` again, on this device or on any device that holds the
+   new identity.
+3. This device keeps uploading to the backup.
+
+`ReplaceKeyBackup`:
+
+1. It creates the new backup, signed by the new master key. From here the new
+   backup is the latest one, but it stays empty until step 4. If this fails,
+   nothing has changed, unless the server created the backup and only the
+   answer was lost. That case leaves the state of a stop between steps 1 and 2,
+   described next.
+2. It stores the new key under the new recovery key. If this fails, rihma reads
+   secret storage back. If the key is there, the write landed and rihma carries
+   on with step 3. If the key is not there, rihma deletes the new backup again,
+   so the old one is the latest once more and is unchanged. If rihma cannot
+   read secret storage, it deletes nothing, and the state is either this one or
+   the state after step 2. If the cleanup fails, or the process stops between
+   steps 1 and 2, the empty new backup stays the latest. The old backup and its
+   key in secret storage are untouched, and nothing is uploaded to the new
+   backup. Uploads to the old backup stop, and a rihma device that saw that
+   happen resumes them after a restart.
+3. It deletes the old backup. If an earlier replace was interrupted, it also
+   deletes the backup this device was still uploading to. If this fails, the
+   new backup works and the new recovery key restores it, but the old one is
+   still on the server.
+4. This device starts uploading to the new backup. If this fails, the state is
+   as after a failure at step 3.
+
+A second replace deletes the backups the first one left behind, so it ends
+with a single backup. There is one exception. Suppose the device never uploaded
+to the old backup, and the first run stopped between steps 1 and 2 or could not
+tell whether step 2 landed. The second run then knows only the new backup, and
+the old one stays on the server. It is no longer the
+latest backup, so no client restores it or uploads to it.
+
 ## Logs and errors
 
 rihma logs the stage name and attempt number at debug level. Errors carry
@@ -121,14 +224,21 @@ password. The same holds for an error from `Approve`.
 The password, the approval URL, the server's `msg` and error text, and the
 recovery key never reach a log, or an error from the upload or the approval.
 Request bodies are omitted from request logs at every level, as for all rihma
-requests.
+requests. The backup repairs log backup version numbers at debug level, and
+never the backup key or the recovery key.
 
 ## Limits
 
-- The key backup is not touched. Its key stays in secret storage under the old
-  recovery key, which the new recovery key cannot read. `RestoreKeyBackup` with
-  the new key therefore fails until the backup has been replaced. Deciding
-  whether to carry the backup over or replace it is follow-up work.
+- A reset does not repair the key backup on its own. The application calls
+  `CarryKeyBackup` or `ReplaceKeyBackup` afterwards, as described above. Until
+  it does, `RestoreKeyBackup` with the new recovery key fails.
+- mautrix checks a backup's signature over only the auth data fields it
+  models: the public key and the signatures. If a backup's auth data has other
+  fields, such as the passphrase salt that older clients added, a
+  mautrix-based client cannot trust it by signature, whoever signed it. Carry
+  signs the whole auth data, as the specification says, so other clients
+  trust it. A mautrix-based client that holds the backup key trusts the
+  backup without the signature.
 - Delegated login itself, through OAuth 2.0 or OIDC, is a separate capability.
   The approval URL arrives in the upload's challenge, so a reset needs no OAuth
   client or token.
@@ -136,3 +246,7 @@ requests.
   that answers the way Synapse does. The live suite runs the password reset on
   a disposable Synapse. It has no Matrix Authentication Service, so the
   delegated stage is not proven against a real one.
+- The live suite carries and then replaces a backup after a password reset on
+  the disposable Synapse, and reads old history with the new recovery key.
+  Interruptions are tested only against the fake server, which fails one
+  chosen step at a time.

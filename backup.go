@@ -2,7 +2,6 @@ package rihma
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,7 +11,6 @@ import (
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/crypto"
 	"maunium.net/go/mautrix/crypto/backup"
-	"maunium.net/go/mautrix/crypto/signatures"
 	"maunium.net/go/mautrix/crypto/ssss"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
@@ -94,12 +92,10 @@ func (c *Client) EnableKeyBackup(ctx context.Context, recoveryKey string) error 
 	if err != nil {
 		return err
 	}
-	auth := backup.MegolmAuthData{PublicKey: id.Ed25519(base64.RawStdEncoding.EncodeToString(key.PublicKey().Bytes()))}
-	sig, err := mach.CrossSigningKeys.MasterKey.SignJSON(auth)
+	auth, err := signedBackupAuth(c.UserID, mach.CrossSigningKeys.MasterKey, key)
 	if err != nil {
-		return fmt.Errorf("rihma: sign key backup: %w", err)
+		return err
 	}
-	auth.Signatures = signatures.NewSingleSignature(c.UserID, id.KeyAlgorithmEd25519, mach.CrossSigningKeys.MasterKey.PublicKey().String(), sig)
 	resp, err := c.CreateKeyBackupVersion(ctx, &mautrix.ReqRoomKeysVersionCreate[backup.MegolmAuthData]{
 		Algorithm: id.KeyBackupAlgorithmMegolmBackupV1, AuthData: auth,
 	})
