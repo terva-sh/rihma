@@ -1,7 +1,8 @@
 # Verification during sync
 
-`Client.EnableSAS()` opts into same-account, to-device emoji
-verification before the client's first `Sync`. It performs no network I/O.
+`Client.EnableSAS()` opts into to-device emoji verification before the
+client's first `Sync`: with this account's other devices in both
+directions, and outgoing with another user. It performs no network I/O.
 The returned `SASController` shares the existing crypto-aware syncer; it never
 starts another sync loop. Clients that do not opt in keep bot behavior.
 
@@ -42,7 +43,7 @@ cancellation reasons never enter snapshots or errors. Caller cancellation may
 occur after a request was sent; read the snapshot instead of assuming rollback.
 The controller suppresses helper context logging, including ephemeral SAS data.
 
-Only one attempt is active. Busy, same-device, cross-user, in-room, oversized,
+Only one attempt is active. Busy, same-device, incoming cross-user, in-room, oversized,
 old and excessively future-dated requests are ignored. IDs are remembered for the whole controller lifetime: a helper timer may be
 delayed beyond its deadline, so elapsed time cannot make ID reuse safe. At most
 64 incoming and outgoing attempts are admitted per controller/Sync, bounding
@@ -67,8 +68,45 @@ incoming same-account attempt, calls confirm on its own goroutine, and owns its
 own Sync. It continues to reject an already-syncing state directory. Its
 confirm callback may block and must arrange its own cancellation if needed.
 
-Cross-user verification, in-room requests and QR are not exposed by this
-controller. SSO/OIDC login is unrelated and remains outside this feature.
+## Verifying another user
+
+`StartUser(ctx, user)` asks every device `user` publishes to verify this
+account, over to-device messages. Naming the user is the consent. Before
+it sends anything it checks that this device holds the account's
+cross-signing keys and the server still publishes them
+(`ErrNoCrossSigningKeys`), that the user publishes a master key
+(`ErrNoUserIdentity`, after refreshing their devices), and that none of
+their devices has this device's id (`ErrPeerDeviceIDConflict`). This
+account's own id returns `ErrOwnUser`. A failed check sends nothing and
+leaves the snapshot as it was. Otherwise the attempt runs like `Start`;
+snapshots carry `OtherUser`, the user named.
+
+Every follow-up must come from the attempt's user, so neither a third
+party nor this account's other devices can steer it. When both people
+have confirmed, rihma signs the user's master key with this account's
+user-signing key, records it for `Options.OnIdentityChange` as
+`SignUserIdentity` does, and publishes done with `MasterKey` set. A peer
+whose MAC named no master key ends failed with reason `unsigned`, and a
+master key that changed on the server before done ends failed with
+`identity_changed`. In both cases the peer's device stays verified,
+because a published signature cannot be taken back.
+
+`Client.VerifyUser(ctx, user, confirm)` is the one-shot form for a bot
+that is not running, the outgoing counterpart of `AwaitSAS`. It runs its
+own Sync, fails with `ErrSyncInProgress` while anything else syncs on the
+state directory, sends the request with `StartUser`, calls confirm with
+the emoji on its own goroutine, and returns the user's master key once it
+is signed and recorded. It never confirms unless confirm returns true,
+never accepts an incoming request, and returns `ErrSASMismatch`,
+`ErrSASCancelled` (the user cancelled, or the request timed out),
+`ErrSASUnsigned` or a wrapped `ErrMasterKeyMismatch`. Element answers the
+request only from a user whose devices it already tracks, so the bot and
+the user must share an encrypted room, such as their DM, first. Compare the emoji
+over a channel the homeserver cannot change, such as the bot's terminal;
+see [verifying another user](cross-user-verification.md) for why, and for
+incoming and in-room verification, which are designed but not exposed.
+QR is not exposed by this controller. SSO/OIDC login is unrelated and
+remains outside this feature.
 
 Device trust and key recovery use the existing `Verification`,
 `RestoreFromRecoveryKey` and `RestoreKeyBackup` operations. A missing identity is

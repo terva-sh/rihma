@@ -3,6 +3,7 @@ package rihma
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -20,6 +21,11 @@ var (
 	ErrSASStale       = errors.New("rihma: verification transaction or state changed")
 	ErrSASOperation   = errors.New("rihma: verification operation failed")
 	ErrSASLimit       = errors.New("rihma: verification attempt limit reached")
+	// ErrPeerDeviceIDConflict is returned by StartUser when the user
+	// publishes a device whose id equals this device's. mautrix v0.31.0
+	// compares devices by id alone and would leave that device out of the
+	// request, so the person using it would never see it.
+	ErrPeerDeviceIDConflict = errors.New("rihma: the user has a device with this device's id")
 )
 
 type SASState string
@@ -43,10 +49,20 @@ type SASSnapshot struct {
 	Revision      uint64
 	State         SASState
 	TransactionID id.VerificationTransactionID
-	OtherDevice   id.DeviceID
-	Emoji         []SASEmoji
+	// OtherUser is the user being verified: this account for a
+	// same-account attempt, or the user named in StartUser.
+	OtherUser   id.UserID
+	OtherDevice id.DeviceID
+	// Room is the room an in-room attempt runs in. It is empty for
+	// to-device attempts, which are the only kind today.
+	Room  id.RoomID
+	Emoji []SASEmoji
+	// MasterKey is set on done for another user: the master key their MAC
+	// named, which this account has signed and recorded.
+	MasterKey id.Ed25519
 	// Reason is a fixed local value: cancelled, mismatch, timeout, rejected,
-	// operation_failed or overflow. Never render a server-supplied reason.
+	// operation_failed, overflow, unsigned or identity_changed. Never render
+	// a server-supplied reason.
 	Reason string
 }
 
@@ -55,6 +71,7 @@ type sasCommand struct {
 	txn    id.VerificationTransactionID
 	action string
 	match  bool
+	user   id.UserID
 	result chan sasResult
 }
 
@@ -64,8 +81,8 @@ type sasResult struct {
 	expires time.Time
 }
 
-// SASController handles same-account, to-device emoji verification
-// through Client.Sync. It never starts sync. One controller lasts one Sync;
+// SASController handles to-device emoji verification through Client.Sync:
+// with this account's other devices, and outgoing with another user. It never starts sync. One controller lasts one Sync;
 // attempts can repeat during that Sync. It does not persist pending attempts.
 // Call EnableSAS before the client's first Sync. Stop Sync before closing stores.
 type SASController struct {
@@ -76,6 +93,9 @@ type SASController struct {
 	callbacks *sasCallbacks
 	mu        sync.Mutex
 	snapshot  SASSnapshot
+	// peer and master fill the snapshot's OtherUser and MasterKey.
+	peer   id.UserID
+	master id.Ed25519
 	// AwaitSAS follows its first observed transaction. Retain that value even
 	// when later requests replace the public coalescing snapshot.
 	awaitOne   bool
@@ -129,6 +149,7 @@ func (s *SASController) initWithStore(ctx context.Context, store verificationhel
 	s.client.Client.Syncer = proxy
 	defer func() { s.client.Client.Syncer = original }()
 	s.gate.store = s.store
+	s.gate.callbacks = s.callbacks
 	helper := verificationhelper.NewVerificationHelper(s.client.Client, s.client.OlmMachine(), store, s.callbacks, false, false, true)
 	// Init may have registered some handlers before failing. Buffer registration
 	// until success so retries neither reuse a failed helper nor duplicate handlers.
@@ -175,10 +196,21 @@ func (s *SASController) awaitSnapshot() SASSnapshot {
 	return out
 }
 
+// begin names the user of a new attempt and clears the last one's key.
+func (s *SASController) begin(user id.UserID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.peer, s.master = user, ""
+}
+
 func (s *SASController) set(state SASState, txn id.VerificationTransactionID, device id.DeviceID, emoji []SASEmoji, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.snapshot = SASSnapshot{Revision: s.snapshot.Revision + 1, State: state, TransactionID: txn, OtherDevice: device, Emoji: append([]SASEmoji(nil), emoji...), Reason: reason}
+	var peer id.UserID
+	if txn != "" {
+		peer = s.peer
+	}
+	s.snapshot = SASSnapshot{Revision: s.snapshot.Revision + 1, State: state, TransactionID: txn, OtherUser: peer, OtherDevice: device, Emoji: append([]SASEmoji(nil), emoji...), MasterKey: s.master, Reason: reason}
 	if s.awaitOne && txn != "" && (s.awaitState.TransactionID == "" || s.awaitState.TransactionID == txn) {
 		s.awaitState = s.snapshot
 	}
@@ -216,6 +248,7 @@ func (s *SASController) stop() {
 		s.gate.mu.Lock()
 		s.gate.active = false
 		s.gate.mu.Unlock()
+		s.gate.dropHeld()
 		if started {
 			<-s.done
 		}
@@ -245,14 +278,36 @@ func (s *SASController) Cancel(ctx context.Context, txn id.VerificationTransacti
 // Sync, permits only one active attempt, and shares the controller attempt limit.
 // Cancellation may return after a request was sent; inspect Snapshot for its state.
 func (s *SASController) Start(ctx context.Context) (id.VerificationTransactionID, error) {
-	result := s.submit(ctx, "", "start", false)
+	result := s.submit(ctx, "", "start", false, s.client.UserID)
+	return result.txn, result.err
+}
+
+// StartUser asks every device user publishes, over to-device messages, to
+// verify this account with emoji. Naming the user is the consent. Before
+// sending anything it checks that this device holds the account's
+// cross-signing keys and the server still publishes them
+// (ErrNoCrossSigningKeys), that user publishes a master key
+// (ErrNoUserIdentity), refreshing their devices, and that none of their
+// devices shares this device's id (ErrPeerDeviceIDConflict). A failed check
+// sends nothing and leaves the snapshot unchanged. Otherwise it behaves as
+// Start. When both sides confirm, the controller signs user's master key
+// with this account's user-signing key, records it as SignUserIdentity
+// does, and reaches done with Snapshot().MasterKey set.
+func (s *SASController) StartUser(ctx context.Context, user id.UserID) (id.VerificationTransactionID, error) {
+	if user == s.client.UserID {
+		return "", ErrOwnUser
+	}
+	if user == "" {
+		return "", ErrNoUserIdentity
+	}
+	result := s.submit(ctx, "", "start", false, user)
 	return result.txn, result.err
 }
 
 func (s *SASController) command(ctx context.Context, txn id.VerificationTransactionID, action string, match bool) error {
-	return s.submit(ctx, txn, action, match).err
+	return s.submit(ctx, txn, action, match, "").err
 }
-func (s *SASController) submit(ctx context.Context, txn id.VerificationTransactionID, action string, match bool) sasResult {
+func (s *SASController) submit(ctx context.Context, txn id.VerificationTransactionID, action string, match bool, user id.UserID) sasResult {
 	if err := ctx.Err(); err != nil {
 		return sasResult{err: err}
 	}
@@ -266,7 +321,7 @@ func (s *SASController) submit(ctx context.Context, txn id.VerificationTransacti
 	if !running {
 		return sasResult{err: ErrSASUnavailable}
 	}
-	cmd := sasCommand{ctx: ctx, txn: txn, action: action, match: match, result: make(chan sasResult, 1)}
+	cmd := sasCommand{ctx: ctx, txn: txn, action: action, match: match, user: user, result: make(chan sasResult, 1)}
 	select {
 	case s.commands <- cmd:
 	case <-ctx.Done():
@@ -312,12 +367,13 @@ func (s *SASController) run() {
 			for len(s.callbacks.events) > 0 {
 				<-s.callbacks.events
 			}
+			s.gate.dropHeld()
 			s.set(SASFailed, current.TransactionID, current.OtherDevice, nil, "overflow")
 		case ev := <-s.callbacks.events:
 			s.handle(ev)
 		case cmd := <-s.commands:
 			if cmd.action == "start" {
-				result := s.executeStart(cmd.ctx)
+				result := s.executeStart(cmd.ctx, cmd.user)
 				if result.err == nil {
 					timer.Reset(time.Until(result.expires))
 					expiry = timer.C
@@ -354,6 +410,7 @@ func (s *SASController) handle(ev sasEvent) {
 			}
 			return
 		}
+		s.begin(s.client.UserID)
 		s.set(SASRequested, ev.txn, ev.fromDevice, nil, "")
 		return
 	}
@@ -363,9 +420,16 @@ func (s *SASController) handle(ev sasEvent) {
 	switch {
 	case ev.expired:
 		ctx := zerolog.Nop().WithContext(s.runCtx)
+		s.gate.dropHeld()
 		_ = s.helper.CancelVerification(ctx, ev.txn, event.VerificationCancelCodeTimeout, "Verification timed out")
 		_ = s.helper.DismissVerification(ctx, ev.txn)
 		s.set(SASCancelled, ev.txn, current.OtherDevice, nil, "timeout")
+	case ev.extraMAC:
+		ctx := zerolog.Nop().WithContext(s.runCtx)
+		s.gate.dropHeld()
+		_ = s.helper.CancelVerification(ctx, ev.txn, event.VerificationCancelCodeUnexpectedMessage, "Unexpected second MAC")
+		_ = s.helper.DismissVerification(ctx, ev.txn)
+		s.set(SASCancelled, ev.txn, current.OtherDevice, nil, "cancelled")
 	case ev.ready:
 		if current.State == SASSent {
 			s.startReady(ev)
@@ -375,18 +439,75 @@ func (s *SASController) handle(ev sasEvent) {
 			s.set(SASShowing, ev.txn, current.OtherDevice, ev.emoji, "")
 		}
 	case ev.cancelled != "":
+		s.gate.dropHeld()
 		_ = s.helper.DismissVerification(s.runCtx, ev.txn)
 		s.set(SASCancelled, ev.txn, current.OtherDevice, nil, safeSASReason(ev.cancelled))
 	case ev.done:
-		s.set(SASDone, ev.txn, current.OtherDevice, nil, "")
+		s.complete(ev.txn, current)
 	}
 }
 
-func (s *SASController) executeStart(caller context.Context) sasResult {
+// complete finishes a done attempt. For another user, the helper has
+// already signed the master key their MAC named, bypassing rihma's identity
+// records, so SignUserIdentity records it (without a second upload) and
+// refuses if the server now publishes another key. Device trust the helper
+// stored stays either way; a published signature cannot be taken back.
+func (s *SASController) complete(txn id.VerificationTransactionID, current SASSnapshot) {
+	s.mu.Lock()
+	peer := s.peer
+	s.mu.Unlock()
+	if peer == s.client.UserID {
+		s.set(SASDone, txn, current.OtherDevice, nil, "")
+		return
+	}
+	key := s.gate.macMasterKey(txn)
+	if key == "" {
+		s.set(SASFailed, txn, current.OtherDevice, nil, "unsigned")
+		return
+	}
+	err := s.client.SignUserIdentity(zerolog.Nop().WithContext(s.runCtx), peer, key)
+	switch {
+	case errors.Is(err, ErrMasterKeyMismatch):
+		s.set(SASFailed, txn, current.OtherDevice, nil, "identity_changed")
+	case err != nil:
+		s.set(SASFailed, txn, current.OtherDevice, nil, "operation_failed")
+	default:
+		s.mu.Lock()
+		s.master = key
+		s.mu.Unlock()
+		s.set(SASDone, txn, current.OtherDevice, nil, "")
+	}
+}
+
+// checkPeer runs StartUser's prerequisites. It makes network requests, so
+// it runs before the gate is locked.
+func (s *SASController) checkPeer(ctx context.Context, user id.UserID) error {
+	if _, err := s.client.OwnMasterKey(ctx); errors.Is(err, ErrMasterKeyMismatch) {
+		return fmt.Errorf("%w: the server publishes another identity", ErrNoCrossSigningKeys)
+	} else if err != nil {
+		return err
+	}
+	_, err := s.client.UserIdentity(ctx, user)
+	return err
+}
+
+func (s *SASController) executeStart(caller context.Context, user id.UserID) sasResult {
 	ctx, cancel := context.WithCancel(zerolog.Nop().WithContext(caller))
 	defer cancel()
 	stop := context.AfterFunc(s.runCtx, cancel)
 	defer stop()
+	cross := user != s.client.UserID
+	if cross {
+		if sasActive(s.Snapshot().State) {
+			return sasResult{err: ErrSASStale}
+		}
+		if err := s.checkPeer(ctx, user); err != nil {
+			if caller.Err() != nil {
+				return sasResult{err: caller.Err()}
+			}
+			return sasResult{err: err}
+		}
+	}
 	// StartVerification saves only after sending. Hold admission until that save
 	// and our snapshot update finish, including when a peer replies immediately.
 	s.gate.mu.Lock()
@@ -401,11 +522,14 @@ func (s *SASController) executeStart(caller context.Context) sasResult {
 	if s.gate.attempts >= 64 {
 		return sasResult{err: ErrSASLimit}
 	}
-	devices, err := s.client.OlmMachine().CryptoStore.GetDevices(ctx, s.client.UserID)
+	devices, err := s.client.OlmMachine().CryptoStore.GetDevices(ctx, user)
 	if err == nil && len(devices) == 0 {
 		var keys map[id.UserID]map[id.DeviceID]*id.Device
-		keys, err = s.client.OlmMachine().FetchKeys(ctx, []id.UserID{s.client.UserID}, true)
-		devices = keys[s.client.UserID]
+		keys, err = s.client.OlmMachine().FetchKeys(ctx, []id.UserID{user}, true)
+		devices = keys[user]
+	}
+	if _, shared := devices[s.client.DeviceID]; err == nil && cross && shared {
+		return sasResult{err: ErrPeerDeviceIDConflict}
 	}
 	peer := false
 	for device := range devices {
@@ -424,7 +548,8 @@ func (s *SASController) executeStart(caller context.Context) sasResult {
 	// calling upstream, independently of the successfully saved transaction IDs.
 	s.gate.attempts++
 	expires := time.Now().Add(10 * time.Minute)
-	txn, err := s.helper.StartVerification(ctx, s.client.UserID)
+	s.begin(user)
+	txn, err := s.helper.StartVerification(ctx, user)
 	if txn != "" {
 		s.gate.recent[txn] = time.Now().Add(10 * time.Minute)
 	}
@@ -505,18 +630,24 @@ func (s *SASController) execute(cmd sasCommand) error {
 			err = s.helper.ConfirmSAS(ctx, cmd.txn)
 			if err == nil {
 				s.set(SASConfirmed, cmd.txn, current.OtherDevice, nil, "")
+				// Our MAC is sent, so the peer's MAC is checked second, the
+				// order in which the helper signs another user.
+				s.gate.releaseHeld(zerolog.Nop().WithContext(s.runCtx), cmd.txn)
 			}
 		} else {
+			s.gate.dropHeld()
 			err = s.helper.CancelVerification(ctx, cmd.txn, event.VerificationCancelCodeSASMismatch, "Emoji did not match")
 			_ = s.helper.DismissVerification(ctx, cmd.txn)
 			s.set(SASCancelled, cmd.txn, current.OtherDevice, nil, "mismatch")
 		}
 	case "cancel":
+		s.gate.dropHeld()
 		err = s.helper.CancelVerification(ctx, cmd.txn, event.VerificationCancelCodeUser, "User cancelled")
 		_ = s.helper.DismissVerification(ctx, cmd.txn)
 		s.set(SASCancelled, cmd.txn, current.OtherDevice, nil, "cancelled")
 	}
 	if err != nil {
+		s.gate.dropHeld()
 		_ = s.helper.DismissVerification(ctx, cmd.txn)
 		if cmd.action != "cancel" && !(cmd.action == "confirm" && !cmd.match) {
 			s.set(SASFailed, cmd.txn, current.OtherDevice, nil, "operation_failed")
@@ -530,15 +661,29 @@ func (s *SASController) execute(cmd sasCommand) error {
 }
 
 // Handler registration remains on the existing crypto-aware syncer. Excluding
-// in-room and cross-user requests here prevents helper transactions/timers for
-// unsupported requests, rather than merely hiding their UI callbacks.
+// in-room requests and requests from other users here prevents helper
+// transactions/timers for unsupported requests, rather than merely hiding
+// their UI callbacks.
 type sasEventGate struct {
-	mu       sync.Mutex
-	active   bool
-	store    *sasStore
-	recent   map[id.VerificationTransactionID]time.Time
-	attempts int
+	mu        sync.Mutex
+	active    bool
+	store     *sasStore
+	callbacks *sasCallbacks
+	recent    map[id.VerificationTransactionID]time.Time
+	attempts  int
+	// For an attempt with another user: the MACs admitted so far, the master
+	// key the admitted one named, and the events held until our MAC is sent.
+	macTxn    id.VerificationTransactionID
+	macs      int
+	macMaster id.Ed25519
+	held      []heldEvent
 }
+
+type heldEvent struct {
+	ev      *event.Event
+	handler mautrix.EventHandler
+}
+
 type sasHandlerSyncer struct {
 	*mautrix.DefaultSyncer
 	underlying    *mautrix.DefaultSyncer
@@ -556,10 +701,13 @@ func (s *sasHandlerSyncer) OnEventType(kind event.Type, handler mautrix.EventHan
 	wrapped := func(ctx context.Context, ev *event.Event) {
 		s.gate.mu.Lock()
 		defer s.gate.mu.Unlock()
-		if !s.gate.active || ctx.Err() != nil || ev.Sender != s.user {
+		if !s.gate.active || ctx.Err() != nil {
 			return
 		}
 		if kind == event.ToDeviceVerificationRequest {
+			if ev.Sender != s.user {
+				return
+			}
 			req := ev.Content.AsVerificationRequest()
 			now := time.Now()
 			if req.FromDevice == s.device || req.FromDevice == "" || len(req.FromDevice) > 256 || req.TransactionID == "" || len(req.TransactionID) > 256 || req.Timestamp.Time.After(now.Add(time.Minute)) || !req.Timestamp.Add(10*time.Minute).After(now) {
@@ -578,13 +726,8 @@ func (s *sasHandlerSyncer) OnEventType(kind event.Type, handler mautrix.EventHan
 				s.gate.recent[req.TransactionID] = req.Timestamp.Add(10 * time.Minute)
 				s.gate.attempts++
 			}
-		}
-		if kind == event.ToDeviceVerificationReady && s.gate.store != nil {
-			ready := ev.Content.AsVerificationReady()
-			txn, err := s.gate.store.GetVerificationTransaction(ctx, ready.TransactionID)
-			if err != nil || ready.FromDevice == "" || ready.FromDevice == s.device || len(ready.FromDevice) > 256 || txn.VerificationState != verificationhelper.VerificationStateRequested || !slices.Contains(txn.SentToDeviceIDs, ready.FromDevice) {
-				return
-			}
+		} else if !s.admitFollowUp(ctx, kind, ev, handler) {
+			return
 		}
 		handler(zerolog.Nop().WithContext(ctx), ev)
 	}
@@ -593,6 +736,113 @@ func (s *sasHandlerSyncer) OnEventType(kind event.Type, handler mautrix.EventHan
 	} else {
 		s.underlying.OnEventType(kind, wrapped)
 	}
+}
+
+// admitFollowUp binds a follow-up to its transaction's user, because the
+// helper routes follow-ups by transaction id alone. A follow-up naming no
+// known transaction reaches the helper only from this account, as before
+// cross-user support, so another user cannot make this device reply. It
+// runs under the gate lock.
+func (s *sasHandlerSyncer) admitFollowUp(ctx context.Context, kind event.Type, ev *event.Event, handler mautrix.EventHandler) bool {
+	if s.gate.store == nil {
+		return ev.Sender == s.user
+	}
+	content, ok := ev.Content.Parsed.(event.VerificationTransactionable)
+	if !ok {
+		return ev.Sender == s.user
+	}
+	txn, err := s.gate.store.GetVerificationTransaction(ctx, content.GetTransactionID())
+	if err != nil {
+		return ev.Sender == s.user && kind != event.ToDeviceVerificationReady
+	}
+	if ev.Sender != txn.TheirUserID {
+		return false
+	}
+	switch kind {
+	case event.ToDeviceVerificationReady:
+		// Device ids are scoped to their user: compare with this device only
+		// for this account's own devices.
+		ready := ev.Content.AsVerificationReady()
+		if ready.FromDevice == "" || (ev.Sender == s.user && ready.FromDevice == s.device) || len(ready.FromDevice) > 256 || txn.VerificationState != verificationhelper.VerificationStateRequested || !slices.Contains(txn.SentToDeviceIDs, ready.FromDevice) {
+			return false
+		}
+	case event.ToDeviceVerificationMAC:
+		if ev.Sender != s.user {
+			return s.gate.admitPeerMAC(txn, ev, handler)
+		}
+	case event.ToDeviceVerificationDone:
+		// A done that overtakes a held MAC would find the helper short of
+		// the MAC exchange and cancel; keep their order. Only the held MAC
+		// and one done are kept, and repeated dones are dropped, so a peer
+		// cannot grow the queue while the local person decides.
+		if len(s.gate.held) > 0 && s.gate.macTxn == txn.TransactionID {
+			if len(s.gate.held) == 1 {
+				s.gate.held = append(s.gate.held, heldEvent{ev, handler})
+			}
+			return false
+		}
+	}
+	return true
+}
+
+// admitPeerMAC handles another user's MAC. mautrix v0.31.0 signs the other
+// user only when it checks their MAC after sending ours, so a MAC that
+// arrives before the local person confirms is held until then. One MAC is
+// admitted per attempt; a second cancels it. Runs under the gate lock.
+func (g *sasEventGate) admitPeerMAC(txn verificationhelper.VerificationTransaction, ev *event.Event, handler mautrix.EventHandler) bool {
+	if g.macTxn != txn.TransactionID {
+		g.macTxn, g.macs, g.macMaster, g.held = txn.TransactionID, 0, "", nil
+	}
+	g.macs++
+	if g.macs > 1 {
+		g.held = nil
+		if g.callbacks != nil {
+			g.callbacks.post(sasEvent{txn: txn.TransactionID, extraMAC: true})
+		}
+		return false
+	}
+	g.macMaster = ""
+	for keyID := range ev.Content.AsVerificationMAC().MAC {
+		if _, key := keyID.Parse(); key != txn.TheirDeviceID.String() {
+			g.macMaster = id.Ed25519(key)
+		}
+	}
+	if !txn.SentOurMAC {
+		g.held = append(g.held, heldEvent{ev, handler})
+		return false
+	}
+	return true
+}
+
+// releaseHeld passes events held for txn to the helper, in arrival order.
+func (g *sasEventGate) releaseHeld(ctx context.Context, txn id.VerificationTransactionID) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	held := g.held
+	g.held = nil
+	if !g.active || g.macTxn != txn {
+		return
+	}
+	for _, h := range held {
+		h.handler(ctx, h.ev)
+	}
+}
+
+// dropHeld discards held events when an attempt ends without our MAC.
+func (g *sasEventGate) dropHeld() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.held = nil
+}
+
+// macMasterKey is the master key named by the MAC admitted for txn.
+func (g *sasEventGate) macMasterKey(txn id.VerificationTransactionID) id.Ed25519 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.macTxn != txn {
+		return ""
+	}
+	return g.macMaster
 }
 
 type sasRegistration struct {

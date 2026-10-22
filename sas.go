@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"maunium.net/go/mautrix/crypto/verificationhelper"
 	"maunium.net/go/mautrix/event"
@@ -24,6 +25,10 @@ var (
 	// ErrSASCancelled is wrapped by AwaitSAS when the other device
 	// cancelled or the verification timed out on the server's side.
 	ErrSASCancelled = errors.New("rihma: verification cancelled")
+	// ErrSASUnsigned is returned by VerifyUser when the other user's
+	// device completed the exchange without naming their master key, so
+	// their device is verified but the user is not.
+	ErrSASUnsigned = errors.New("rihma: the other user's verification did not cover their master key")
 )
 
 // AwaitSAS answers one emoji (SAS) verification that another device of
@@ -63,6 +68,141 @@ func (c *Client) AwaitSAS(ctx context.Context, confirm func([]SASEmoji) bool) er
 	go func() { syncErr <- c.Sync(ctx) }()
 	defer func() { cancel(); <-syncErr }()
 	return awaitSAS(ctx, controller, syncErr, confirm)
+}
+
+// VerifyUser asks user to verify this account with emoji, and returns
+// user's master key once both people have confirmed and this account has
+// signed and recorded it, as SignUserIdentity does. It is the outgoing
+// counterpart of AwaitSAS, for a bot whose operator compares the emoji
+// over a channel the homeserver cannot change, such as the bot's
+// terminal.
+//
+// The request goes over to-device messages to every device user
+// publishes; StartUser lists the checks made before anything is sent.
+// confirm is shown the emoji and reports whether user's device shows the
+// same seven. It runs on VerifyUser's goroutine and may block. VerifyUser
+// never confirms unless confirm returns true, and then returns
+// ErrSASMismatch if it returned false and ErrSASCancelled if user
+// cancels or the request times out. A peer whose device does not name
+// their master key ends with ErrSASUnsigned, and a master key that changed
+// on the server before completion with ErrMasterKeyMismatch.
+//
+// Element answers the request only from a user whose devices it already
+// tracks, so the bot and user should share an encrypted room, such as
+// their DM; otherwise Element drops it and VerifyUser ends with
+// ErrSASCancelled when it times out.
+//
+// Like AwaitSAS it runs its own Sync, so it fails with ErrSyncInProgress
+// while anything else syncs on this state directory, and a Client can run
+// only one verification in its lifetime. Bound the wait with ctx.
+func (c *Client) VerifyUser(ctx context.Context, user id.UserID, confirm func([]SASEmoji) bool) (id.Ed25519, error) {
+	if user == c.UserID {
+		return "", ErrOwnUser
+	}
+	if err := c.Connect(ctx); err != nil {
+		return "", err
+	}
+	unlock, err := lockSync(c.opts.StateDir)
+	if err != nil {
+		return "", err
+	}
+	unlock() // only a check: Sync below takes it for real
+
+	controller, err := c.EnableSAS()
+	if err != nil {
+		return "", err
+	}
+	if err := controller.prepareAwait(); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	syncErr := make(chan error, 1)
+	go func() { syncErr <- c.Sync(ctx) }()
+	defer func() { cancel(); <-syncErr }()
+	if err := waitSASStarted(ctx, controller, syncErr); err != nil {
+		return "", err
+	}
+	txn, err := controller.StartUser(ctx, user)
+	if err != nil {
+		return "", err
+	}
+	return verifyUser(ctx, controller, syncErr, txn, confirm)
+}
+
+// waitSASStarted waits until Sync has started the controller, which it
+// does before its first request.
+func waitSASStarted(ctx context.Context, controller *SASController, syncErr chan error) error {
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		controller.mu.Lock()
+		started, stopped := controller.started, controller.stopped
+		controller.mu.Unlock()
+		if started && !stopped {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-syncErr:
+			syncErr <- err
+			return fmt.Errorf("rihma: sync stopped before verification: %w", err)
+		case <-tick.C:
+		}
+	}
+}
+
+// verifyUser follows txn, VerifyUser's own attempt, to its end. It never
+// accepts a request: an incoming one is someone else's attempt.
+func verifyUser(ctx context.Context, controller *SASController, syncErr chan error, txn id.VerificationTransactionID, confirm func([]SASEmoji) bool) (id.Ed25519, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case err := <-syncErr:
+			syncErr <- err
+			return "", fmt.Errorf("rihma: sync stopped during verification: %w", err)
+		case _, ok := <-controller.Changed():
+			state := controller.awaitSnapshot()
+			if state.TransactionID != txn {
+				if !ok {
+					return "", ErrSASUnavailable
+				}
+				continue
+			}
+			switch state.State {
+			case SASShowing:
+				match := confirm(state.Emoji)
+				err := controller.Confirm(ctx, txn, match)
+				if !match {
+					return "", ErrSASMismatch
+				}
+				if err != nil {
+					// The peer may have cancelled while confirm was deciding.
+					if controller.awaitSnapshot().State == SASCancelled {
+						return "", ErrSASCancelled
+					}
+					return "", err
+				}
+			case SASDone:
+				return state.MasterKey, nil
+			case SASCancelled:
+				return "", ErrSASCancelled
+			case SASFailed:
+				switch state.Reason {
+				case "unsigned":
+					return "", ErrSASUnsigned
+				case "identity_changed":
+					return "", fmt.Errorf("%w: it changed before verification completed", ErrMasterKeyMismatch)
+				}
+				return "", ErrSASOperation
+			}
+			if !ok {
+				return "", ErrSASUnavailable
+			}
+		}
+	}
 }
 
 func awaitSAS(ctx context.Context, controller *SASController, syncErr chan error, confirm func([]SASEmoji) bool) error {
@@ -117,6 +257,8 @@ type sasEvent struct {
 	emoji       []SASEmoji
 	cancelled   event.VerificationCancelCode
 	done        bool
+	// extraMAC reports a second MAC from another user in one attempt.
+	extraMAC bool
 }
 
 type sasCallbacks struct {
