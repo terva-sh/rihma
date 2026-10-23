@@ -627,7 +627,7 @@ func TestOAuthBeginLoginRegistersNativePublicClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, secondDevice := f.authorize(t, second.URL)
-	if first.state == second.state || first.verifier == second.verifier || firstDevice == secondDevice || first.clientID == second.clientID {
+	if first.p.secrets.state == second.p.secrets.state || first.p.secrets.verifier == second.p.secrets.verifier || firstDevice == secondDevice || first.p.clientID == second.p.clientID {
 		t.Fatal("attempts share state, verifier, device or registration")
 	}
 	if fmt.Sprint(f.lastRegistration["redirect_uris"]) != "[http://[::1]/callback]" {

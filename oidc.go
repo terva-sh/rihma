@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -192,21 +193,41 @@ type OAuthClientMetadata struct {
 
 // OAuthAuthorization is one pending browser authorization. It holds the
 // attempt's state and PKCE verifier in memory only; it cannot be resumed
-// after a restart. Drop it to cancel.
+// after a restart. Drop it to cancel. It formats as a fixed placeholder, by
+// pointer or by value, and marshals to an empty JSON object.
 type OAuthAuthorization struct {
 	// URL is the authorization page to open in the user's browser. It carries
-	// the attempt's state: treat it as transient and do not log it.
-	URL string
+	// the attempt's state: treat it as transient and do not log it. The
+	// value formats without it, but fmt prints it from an
+	// OAuthAuthorization held in another struct's unexported field.
+	URL string `json:"-"`
 
+	// The attempt sits behind a pointer, so a copy of the value does not copy
+	// its lock, and its secrets sit behind another, so fmt reaches neither:
+	// in an unexported field it dereferences at most one pointer.
+	p *oauthAttempt
+}
+
+type oauthAttempt struct {
 	server   *OAuthServer
 	clientID string
 	redirect *url.URL
-	state    string
-	verifier string
+	secrets  *oauthAttemptSecrets
 	deviceID id.DeviceID
 
 	mu   sync.Mutex
 	done bool
+}
+
+type oauthAttemptSecrets struct {
+	state    string
+	verifier string
+}
+
+// Format prints a placeholder for every verb, so the URL's state and the
+// PKCE verifier cannot reach a log through fmt.
+func (OAuthAuthorization) Format(f fmt.State, _ rune) {
+	io.WriteString(f, "rihma.OAuthAuthorization{redacted}")
 }
 
 // BeginLogin registers a native public client for one attempt, as MSC2966
@@ -256,15 +277,14 @@ func (s *OAuthServer) BeginLogin(ctx context.Context, client OAuthClientMetadata
 	if reg == nil || reg.ClientID == "" || reg.TokenEndpointAuthMethod != "" && reg.TokenEndpointAuthMethod != oauth.AuthMethodNone {
 		return nil, ErrOAuthRegistration
 	}
-	a := &OAuthAuthorization{
+	a := &oauthAttempt{
 		server:   s,
 		clientID: reg.ClientID,
 		redirect: redirect,
-		state:    randomURLToken(),
-		verifier: randomURLToken(),
+		secrets:  &oauthAttemptSecrets{state: randomURLToken(), verifier: randomURLToken()},
 		deviceID: id.DeviceID(strings.TrimRight(base32.StdEncoding.EncodeToString(randomBytes(10)), "=")),
 	}
-	challenge := sha256.Sum256([]byte(a.verifier))
+	challenge := sha256.Sum256([]byte(a.secrets.verifier))
 	authURL, err := url.Parse(s.meta.AuthorizationEndpoint)
 	if err != nil {
 		return nil, ErrOAuthDiscovery
@@ -274,13 +294,12 @@ func (s *OAuthServer) BeginLogin(ctx context.Context, client OAuthClientMetadata
 	q.Set("client_id", a.clientID)
 	q.Set("redirect_uri", redirect.String())
 	q.Set("scope", s.scopePrefix+"api:* "+s.scopePrefix+"device:"+string(a.deviceID))
-	q.Set("state", a.state)
+	q.Set("state", a.secrets.state)
 	q.Set("response_mode", string(oauth.ResponseModeQuery))
 	q.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:]))
 	q.Set("code_challenge_method", string(oauth.CodeChallengeMethodS256))
 	authURL.RawQuery = q.Encode()
-	a.URL = authURL.String()
-	return a, nil
+	return &OAuthAuthorization{URL: authURL.String(), p: a}, nil
 }
 
 func randomBytes(n int) []byte {
@@ -355,10 +374,11 @@ var oauthErrorCode = regexp.MustCompile(`^[a-z_]{1,64}$`)
 // so a stray request does not end it. An authorization error response returns
 // ErrOAuthDenied, naming only a well-formed OAuth error code. A successful
 // Accept finishes the attempt; pass the result to Open in Options.OAuthLogin.
-func (a *OAuthAuthorization) Accept(callback string) (*OAuthLogin, error) {
-	if a == nil || a.server == nil {
+func (o *OAuthAuthorization) Accept(callback string) (*OAuthLogin, error) {
+	if o == nil || o.p == nil || o.p.server == nil {
 		return nil, ErrOAuthCallback
 	}
+	a := o.p
 	u, err := url.Parse(callback)
 	if err != nil || u.User != nil || u.Opaque != "" || u.Fragment != "" ||
 		u.Scheme != a.redirect.Scheme || u.Host != a.redirect.Host || u.EscapedPath() != a.redirect.EscapedPath() {
@@ -369,7 +389,7 @@ func (a *OAuthAuthorization) Accept(callback string) (*OAuthLogin, error) {
 		return nil, ErrOAuthCallback
 	}
 	state := q["state"]
-	if len(state) != 1 || subtle.ConstantTimeCompare([]byte(state[0]), []byte(a.state)) != 1 {
+	if len(state) != 1 || subtle.ConstantTimeCompare([]byte(state[0]), []byte(a.secrets.state)) != 1 {
 		return nil, ErrOAuthCallback
 	}
 	iss := q["iss"]
@@ -393,24 +413,35 @@ func (a *OAuthAuthorization) Accept(callback string) (*OAuthLogin, error) {
 		return nil, ErrOAuthCallback
 	}
 	a.done = true
-	return &OAuthLogin{grant: oauthGrant{
+	return &OAuthLogin{p: &oauthLoginState{grant: &oauthGrant{
 		server:      a.server,
 		clientID:    a.clientID,
 		redirectURI: a.redirect.String(),
 		code:        code[0],
-		verifier:    a.verifier,
+		verifier:    a.secrets.verifier,
 		deviceID:    a.deviceID,
-	}}, nil
+	}}}, nil
 }
 
 // OAuthLogin is an accepted authorization response, ready for Open. It holds
 // the authorization code and PKCE verifier: do not log or retain it. It is
-// single-use, whether the exchange succeeds or fails.
+// single-use, whether the exchange succeeds or fails; copies share that use.
+// It formats as a fixed placeholder, by pointer or by value, and marshals to
+// an empty JSON object.
 type OAuthLogin struct {
+	p *oauthLoginState
+}
+
+// The grant sits behind its own pointer, as the attempt's secrets do.
+type oauthLoginState struct {
 	mu    sync.Mutex
 	used  bool
-	grant oauthGrant
+	grant *oauthGrant
 }
+
+// Format prints a placeholder for every verb, so the code and verifier
+// cannot reach a log through fmt.
+func (OAuthLogin) Format(f fmt.State, _ rune) { io.WriteString(f, "rihma.OAuthLogin{redacted}") }
 
 type oauthGrant struct {
 	server      *OAuthServer
@@ -423,20 +454,24 @@ type oauthGrant struct {
 
 // take marks the login used and returns its values for one exchange.
 func (l *OAuthLogin) take() (oauthGrant, bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.used || l.grant.server == nil {
+	if l == nil || l.p == nil {
 		return oauthGrant{}, false
 	}
-	l.used = true
-	g := l.grant
-	l.grant.code, l.grant.verifier = "", ""
+	p := l.p
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.used || p.grant == nil || p.grant.server == nil {
+		return oauthGrant{}, false
+	}
+	p.used = true
+	g := *p.grant
+	p.grant.code, p.grant.verifier = "", ""
 	return g, true
 }
 
 func (l *OAuthLogin) boundTo(homeserver string) bool {
 	base, ok := normalHomeserver(homeserver)
-	return ok && l.grant.server != nil && l.grant.server.homeserver == base
+	return ok && l != nil && l.p != nil && l.p.grant != nil && l.p.grant.server != nil && l.p.grant.server.homeserver == base
 }
 
 // loginOAuth exchanges the code, confirms the account and device, and saves
@@ -475,7 +510,7 @@ func (c *Client) loginOAuth(ctx context.Context, login *OAuthLogin, pickleKey []
 		return fmt.Errorf("%w: unusable token response", ErrOAuthLogin)
 	}
 	c.sessionMu.Lock()
-	c.session = Session{AccessToken: resp.AccessToken, PickleKey: pickleKey, OAuth: &OAuthSession{
+	c.session = &Session{AccessToken: resp.AccessToken, PickleKey: pickleKey, OAuth: &OAuthSession{
 		Issuer:             l.server.Issuer,
 		ClientID:           l.clientID,
 		TokenEndpoint:      l.server.meta.TokenEndpoint,

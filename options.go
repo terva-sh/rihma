@@ -3,6 +3,7 @@ package rihma
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -75,6 +76,13 @@ type Options struct {
 	// it is used, it must come from DiscoverOAuth on this Homeserver; Open
 	// checks that before any request. It is single-use.
 	OAuthLogin *OAuthLogin
+	// SSOLogin is a login token received by ReceiveSSOLogin. Like Login, it
+	// is used only when Sessions holds no session; Open then exchanges the
+	// token with m.login.token and saves the session before returning. It
+	// cannot be combined with Login or OAuthLogin. When it is used, it must
+	// come from DiscoverLoginFlows on this Homeserver; Open checks that
+	// before any request. It is single-use.
+	SSOLogin *SSOLogin
 	// DeviceName is the display name given to a new device at classic
 	// login. An OAuth device is named by the issuer, usually after the
 	// registered client name.
@@ -104,8 +112,17 @@ type Options struct {
 	OnIdentityChange func(IdentityChange)
 }
 
-// ErrNoSession is returned by Open when there is no stored session and
-// Options.Login is nil.
+// Format prints the homeserver, state directory and device name, and only
+// whether each login option is set, for every verb. Without it fmt prints
+// Login's password or token: a verb that does not suit a field, such as %s
+// on a pointer, makes fmt print the pointed-to value.
+func (o Options) Format(f fmt.State, _ rune) {
+	fmt.Fprintf(f, "rihma.Options{Homeserver:%s StateDir:%s DeviceName:%s Login:%t OAuthLogin:%t SSOLogin:%t}",
+		o.Homeserver, o.StateDir, o.DeviceName, o.Login != nil, o.OAuthLogin != nil, o.SSOLogin != nil)
+}
+
+// ErrNoSession is returned by Open when there is no stored session and no
+// login option is set.
 var ErrNoSession = errors.New("rihma: no stored session and no login given")
 
 func (o *Options) validate() error {
@@ -131,11 +148,21 @@ func (o *Options) validate() error {
 		return errors.New("rihma: Options.StateDir is required")
 	case o.Sessions == nil:
 		return errors.New("rihma: Options.Sessions is required")
-	case o.Login != nil && o.OAuthLogin != nil:
-		return errors.New("rihma: Options.Login and Options.OAuthLogin are exclusive")
+	case countSet(o.Login != nil, o.OAuthLogin != nil, o.SSOLogin != nil) > 1:
+		return errors.New("rihma: Options.Login, Options.OAuthLogin and Options.SSOLogin are exclusive")
 	}
 	if o.UTDWindow == 0 {
 		o.UTDWindow = time.Minute
 	}
 	return nil
+}
+
+func countSet(set ...bool) int {
+	n := 0
+	for _, b := range set {
+		if b {
+			n++
+		}
+	}
+	return n
 }

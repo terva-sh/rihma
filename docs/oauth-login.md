@@ -16,7 +16,8 @@ and the order in which tokens are stored and used.
 
 ## Sign in
 
-The application owns the browser and the callback, as it does for browser SSO.
+The application owns the browser and the callback. Browser SSO can use a
+loopback callback owned by rihma; OAuth login cannot yet.
 
 1. Discover the issuer:
 
@@ -182,6 +183,13 @@ always wins, so log out first or use a new state directory.
 
 ## Logs and errors
 
+`OAuthAuthorization` and `OAuthLogin` print as fixed placeholders with every
+`fmt` verb, by value or by pointer, and marshal to empty JSON objects. The
+state, verifier and code sit two pointers deep, out of fmt's reach even in
+another struct's unexported field. The exception is the exported `URL`, which
+carries the state. fmt prints it when an `OAuthAuthorization` is held in such a
+field, so drop the attempt rather than keep it there.
+
 The client that `Open` builds omits every HTTP request body from logs, which
 covers codes, verifiers and refresh tokens in token requests.
 `DiscoverOAuth` and `BeginLogin` log nothing. The errors from `DiscoverOAuth`,
@@ -195,8 +203,8 @@ callback query and its own listener diagnostics out of its logs.
 
 ## Not covered yet
 
-- A listener owned by rihma. The callback stays with the application, as for
-  browser SSO.
+- A listener owned by rihma. The callback stays with the application. Browser
+  SSO has one, `ReceiveSSOLogin`, which OAuth login does not use yet.
 - The device authorization grant, used for QR login on another device.
 - HTTPS redirects that need the fragment response mode.
 - `prompt=create` for account registration, and login hints.

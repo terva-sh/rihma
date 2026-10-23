@@ -156,7 +156,7 @@ func (c *Client) useBackup(ctx context.Context, mach *crypto.OlmMachine, key *ba
 		return fmt.Errorf("rihma: save backup key: %w", err)
 	}
 	c.backup.mu.Lock()
-	c.session, c.backup.key, c.backup.stopped = next, key, false
+	c.session, c.backup.key, c.backup.stopped = &next, key, false
 	c.backup.mu.Unlock()
 	c.wakeBackup()
 	// The backup is adopted; a device that cannot share its key still works.

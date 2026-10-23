@@ -14,7 +14,9 @@ import (
 )
 
 // Session is what must survive a restart to resume as the same device.
-// AccessToken and PickleKey are secret: never log them.
+// AccessToken and PickleKey are secret: never log them. A Session formats
+// without them, but fmt prints the fields of a Session held in another
+// struct's unexported field, so do not keep one there and format it.
 type Session struct {
 	UserID      id.UserID   `json:"user_id"`
 	DeviceID    id.DeviceID `json:"device_id"`
@@ -44,6 +46,18 @@ type OAuthSession struct {
 	RevocationEndpoint string    `json:"revocation_endpoint"`
 	RefreshToken       string    `json:"refresh_token"`
 	ExpiresAt          time.Time `json:"expires_at"`
+}
+
+// Format prints the user and device and nothing secret, for every verb, so a
+// session cannot reach a log through fmt. JSON, the storage format, still
+// carries every field.
+func (s Session) Format(f fmt.State, _ rune) {
+	fmt.Fprintf(f, "rihma.Session{UserID:%s DeviceID:%s redacted}", s.UserID, s.DeviceID)
+}
+
+// Format prints the issuer and nothing secret, for every verb.
+func (o OAuthSession) Format(f fmt.State, _ rune) {
+	fmt.Fprintf(f, "rihma.OAuthSession{Issuer:%s redacted}", o.Issuer)
 }
 
 // clone copies s so that a later edit cannot reach a stored or saved copy.

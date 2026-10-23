@@ -39,7 +39,8 @@ joined crypto shutdown; see [managed crypto lifecycle](docs/managed-crypto.md)
 for capability detection, explicit module selection and callback ownership.
 
 Applications can discover classic login flows and prepare a browser SSO redirect
-before opening an account; see [browser SSO](docs/browser-sso.md) for callback
+before opening an account, with their own callback or a one-attempt loopback
+callback owned by rihma; see [browser SSO](docs/browser-sso.md) for callback
 ownership, one-use token exchange and session persistence. Homeservers that
 delegate authentication to an OAuth issuer, such as the Matrix Authentication
 Service, use [delegated OAuth login](docs/oauth-login.md) instead, with

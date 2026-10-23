@@ -62,6 +62,12 @@ type sessionSecrets struct {
 	BackupVersion string `json:"backup_version,omitempty"`
 }
 
+// Format prints a placeholder for every verb, so the sealed values cannot
+// reach a log through fmt. JSON, the sealed format, still carries them.
+func (sessionSecrets) Format(f fmt.State, _ rune) {
+	fmt.Fprint(f, "sessionSecrets{redacted}")
+}
+
 func (c fileConfig) autoJoin() bool { return c.AutoJoin != autoJoinNever }
 
 func (c fileConfig) configured() bool {

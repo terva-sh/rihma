@@ -1,10 +1,13 @@
 package rihma
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,8 +32,12 @@ type Client struct {
 	opts Options
 	// sessionMu serializes every session write after Open, so a key-backup
 	// save and an OAuth token rotation cannot overwrite each other.
-	sessionMu    sync.Mutex
-	session      Session // as last saved; reads also take backup.mu
+	sessionMu sync.Mutex
+	// session is as last saved; reads also take backup.mu. It is replaced,
+	// never edited in place, and sits behind a pointer so that fmt, which
+	// dereferences one pointer for a verb such as %s, cannot reach it from
+	// a struct holding a *Client.
+	session      *Session
 	sessionSaved bool
 	backup       backupState
 	xsign        crossSigningState
@@ -54,11 +61,22 @@ type Client struct {
 
 const storeFile = "rihma.db"
 
+// Format prints the user and device, for every verb. Without it fmt would
+// print the stored session, access token included, from the unexported
+// fields.
+func (c *Client) Format(f fmt.State, _ rune) {
+	if c == nil || c.Client == nil {
+		io.WriteString(f, "rihma.Client{}")
+		return
+	}
+	fmt.Fprintf(f, "rihma.Client{UserID:%s DeviceID:%s}", c.UserID, c.DeviceID)
+}
+
 // Open returns a client for the stored session, or logs in with
-// Options.Login or Options.OAuthLogin when there is none. Restoring a
-// session touches no network; the first network use is Connect, which
-// Sync calls. A stored session always wins: Open then ignores both login
-// options, exchanges nothing and replaces no device.
+// Options.Login, Options.OAuthLogin or Options.SSOLogin when there is none.
+// Restoring a session touches no network; the first network use is Connect,
+// which Sync calls. A stored session always wins: Open then ignores every
+// login option, exchanges nothing and replaces no device.
 func Open(ctx context.Context, opts Options) (*Client, error) {
 	if err := opts.validate(); err != nil {
 		return nil, err
@@ -73,13 +91,24 @@ func Open(ctx context.Context, opts Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	if sess == nil && opts.Login == nil && opts.OAuthLogin == nil {
+	if sess == nil && opts.Login == nil && opts.OAuthLogin == nil && opts.SSOLogin == nil {
 		return nil, ErrNoSession
 	}
 	// Check the binding only for a login that will be used: a stored session
 	// wins, but an access token must never reach another homeserver.
 	if sess == nil && opts.OAuthLogin != nil && !opts.OAuthLogin.boundTo(opts.Homeserver) {
 		return nil, fmt.Errorf("%w: authorization belongs to another homeserver", ErrOAuthLogin)
+	}
+	login := opts.Login
+	if sess == nil && opts.SSOLogin != nil {
+		if !opts.SSOLogin.boundTo(opts.Homeserver) {
+			return nil, fmt.Errorf("%w: token belongs to another homeserver", ErrSSOLogin)
+		}
+		token, ok := opts.SSOLogin.take()
+		if !ok {
+			return nil, fmt.Errorf("%w: token already used", ErrSSOLogin)
+		}
+		login = &mautrix.ReqLogin{Type: mautrix.AuthTypeToken, Token: token}
 	}
 	if err := os.MkdirAll(opts.StateDir, 0o700); err != nil {
 		return nil, fmt.Errorf("rihma: state dir: %w", err)
@@ -121,14 +150,18 @@ func Open(ctx context.Context, opts Options) (*Client, error) {
 		db.Close()
 		return nil, fmt.Errorf("rihma: crypto: %w", err)
 	}
-	c := &Client{Client: cli, opts: opts, db: db, helper: helper, syncer: s}
+	c := &Client{Client: cli, opts: opts, db: db, helper: helper, syncer: s, session: &Session{}}
 	cli.SaveNewToken = c.saveRefreshedTokens
+	// The client keeps its own copy of Options; it needs no login option
+	// after Open, so it keeps no password or token either.
+	c.opts.Login, c.opts.OAuthLogin, c.opts.SSOLogin = nil, nil, nil
 	c.backup.wake = make(chan struct{}, 1)
 	c.utd = newUTDLimiter(opts.UTDWindow, opts.OnUTD)
 	helper.DecryptErrorCallback = func(evt *event.Event, _ error) { c.utd.report(evt.RoomID) }
 
 	if sess != nil {
-		c.session, c.sessionSaved = sess.clone(), true
+		restored := sess.clone()
+		c.session, c.sessionSaved = &restored, true
 		if c.session.OAuth != nil {
 			if err := c.restoreOAuth(); err != nil {
 				c.Close()
@@ -155,11 +188,11 @@ func Open(ctx context.Context, opts Options) (*Client, error) {
 
 	// No session: log in now, then save before returning, so a crash
 	// cannot leave a server-side device with no local record of it.
-	login := *opts.Login
-	if login.InitialDeviceDisplayName == "" {
-		login.InitialDeviceDisplayName = opts.DeviceName
+	req := *login
+	if req.InitialDeviceDisplayName == "" {
+		req.InitialDeviceDisplayName = opts.DeviceName
 	}
-	helper.LoginAs = &login
+	helper.LoginAs = &req
 	if err := c.Connect(ctx); err != nil {
 		c.Close()
 		return nil, err
@@ -197,7 +230,7 @@ func (c *Client) writeSession(ctx context.Context, commit bool, edit func(*Sessi
 		c.sessionSaved = true
 	}
 	c.backup.mu.Lock()
-	c.session = next
+	c.session = &next
 	c.backup.mu.Unlock()
 	return nil
 }
@@ -315,4 +348,43 @@ type managedCryptoBackground interface {
 func supportsManagedCryptoBackground() bool {
 	_, ok := any((*crypto.OlmMachine)(nil)).(managedCryptoBackground)
 	return ok
+}
+
+// fetchVersions reads /versions into a value the caller owns. The embedded
+// mautrix Client.SpecVersions field is unsynchronized: Client.Versions writes
+// it and many mautrix methods read it. rihma paths, which can run concurrently
+// with each other and with the application, neither read nor write it.
+//
+// request carries the caller's retry, logging and size options; its method and
+// URL are set here. A zero request uses the client's retries, logger and
+// response limit, as Client.Versions did. A successful response that is not a
+// JSON object of the /versions shape returns errVersionsMalformed, which names
+// no content. This decode is mautrix's, and as lenient: Sliding Sync uses it.
+// RTC discovery validates the raw body strictly instead (rtcAdvertised).
+func (c *Client) fetchVersions(ctx context.Context, request mautrix.FullRequest) (*mautrix.RespVersions, error) {
+	raw, err := c.getVersions(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	var versions mautrix.RespVersions
+	if !bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) || json.Unmarshal(raw, &versions) != nil {
+		return nil, errVersionsMalformed
+	}
+	return &versions, nil
+}
+
+// getVersions returns the raw /versions body; see fetchVersions.
+func (c *Client) getVersions(ctx context.Context, request mautrix.FullRequest) ([]byte, error) {
+	request.Method, request.URL, request.ResponseJSON = http.MethodGet, c.BuildClientURL("versions"), nil
+	return c.MakeFullRequest(ctx, request)
+}
+
+var errVersionsMalformed = errors.New("rihma: invalid /versions response")
+
+// oversizedSuccess reports a 2xx response whose body exceeded the request's
+// size limit. An oversized error body keeps its HTTP status instead.
+func oversizedSuccess(err error) bool {
+	var failure mautrix.HTTPError
+	return errors.As(err, &failure) && failure.Response != nil && failure.Response.StatusCode >= 200 && failure.Response.StatusCode < 300 &&
+		(errors.Is(err, mautrix.ErrResponseTooLong) || errors.Is(err, mautrix.ErrBodyReadReachedLimit))
 }
