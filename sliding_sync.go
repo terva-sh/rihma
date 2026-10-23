@@ -292,8 +292,11 @@ func (s *slidingStateStore) UpdateState(ctx context.Context, ev *event.Event) {
 }
 
 func (c *Client) discoverSliding(ctx context.Context) error {
+	var versions *mautrix.RespVersions
 	for attempt := 1; ; attempt++ {
-		_, err := c.Versions(ctx)
+		var err error
+		// The client's retry and logging defaults, as Client.Versions used.
+		versions, err = c.fetchVersions(ctx, mautrix.FullRequest{})
 		if err == nil {
 			break
 		}
@@ -314,7 +317,7 @@ func (c *Client) discoverSliding(ctx context.Context) error {
 			return err
 		}
 	}
-	if c.SpecVersions == nil || !c.SpecVersions.UnstableFeatures["org.matrix.simplified_msc3575"] {
+	if !versions.UnstableFeatures["org.matrix.simplified_msc3575"] {
 		return ErrSlidingUnsupported
 	}
 	return nil

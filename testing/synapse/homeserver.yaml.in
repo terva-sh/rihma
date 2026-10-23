@@ -57,3 +57,16 @@ rc_invites:
   per_room: { per_second: 1000, burst_count: 1000 }
   per_user: { per_second: 1000, burst_count: 1000 }
   per_issuer: { per_second: 1000, burst_count: 1000 }
+
+# MatrixRTC transport discovery (MSC4143), for rtc_discovery_e2e_test.go.
+# Synapse serves only the unstable endpoint. The URLs are placeholders that
+# nothing contacts; there is no SFU behind them.
+experimental_features:
+  msc4143_enabled: true
+matrix_rtc:
+  transports:
+    - type: livekit
+      url: wss://sfu.example.org
+      livekit_service_url: https://rtc.example.org
+    - type: org.example.future
+      region: eu

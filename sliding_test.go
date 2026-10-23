@@ -715,6 +715,9 @@ func TestSlidingReplayPrecedesCapabilityDiscovery(t *testing.T) {
 			if err = c.Sync(context.Background()); err != ErrSlidingUnsupported || !delivered || !discovered || len(h.requestsCopy()) != 1 {
 				t.Fatal("pending response depended on server capability")
 			}
+			if c.SpecVersions != nil {
+				t.Fatal("capability discovery wrote the shared versions cache")
+			}
 			identity := slidingFingerprint([]string{c.HomeserverURL.String(), string(c.UserID), string(c.DeviceID), string(opts.SlidingSync.Dialect)})
 			disk, err := openSlidingDisk(context.Background(), filepath.Join(opts.StateDir, "sliding.db"), c.session.PickleKey, identity)
 			if err != nil {
