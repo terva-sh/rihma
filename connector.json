@@ -1,6 +1,6 @@
 {
   "name": "rihma",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "exec": "./run.sh",
   "args": [],
   "enabled": true,

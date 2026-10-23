@@ -6,6 +6,114 @@ tracker.
 
 ## Unreleased
 
+## v0.1.12
+
+- `LoginCapabilities.ReceiveSSOLogin` receives a browser SSO login token at
+  a loopback callback that rihma owns for one attempt
+  (TKT-01M3ZRTW1QZB55GNKYF9M6RT4S). It refuses to start with the new
+  `ErrSessionStored` while the session store holds a session. It listens on
+  `127.0.0.1` or `::1` with an OS-assigned port, on a path with a random nonce,
+  and passes the homeserver's SSO page to the application's `Launch`
+  function. It accepts one GET with exactly one nonempty `loginToken`, checking
+  Host, method, body and sizes, and answers duplicates and racing callbacks as
+  used. Its pages are fixed text with no-store and no-referrer headers, and it
+  logs nothing. It shuts the listener down and waits for it before returning.
+  The other endings return `ErrSSODenied`, `ErrSSOTimeout`, `ErrSSOBrowser`,
+  `ErrSSOLoopback` or the caller's context error. The new `Options.SSOLogin`
+  passes the result to `Open`, which checks before any request that the token
+  came from `Options.Homeserver`, takes it once, and returns `ErrSSOLogin`
+  otherwise. Callers that own their callback through `SSORedirectURL` and
+  `Options.Login` are unchanged. The caller's cancellation wins over every
+  other ending, including an accepted callback, whose token is then dropped
+  without being exchanged. See docs/browser-sso.md.
+- Values that hold login secrets no longer print them through `fmt`
+  (TKT-01M3ZRTW1QZB55GNKYF9M6RT4S).
+  - `SSOLogin`, `OAuthLogin` and `OAuthAuthorization` print as placeholders,
+    by value or by pointer, and keep their secrets two pointers deep, out of
+    reach from another struct's unexported field.
+  - `OAuthAuthorization.URL` is left out of JSON.
+  - `Options` prints its homeserver, state directory and device name, and
+    whether each login option is set. Before, a verb such as `%s` printed
+    `Login`'s password or token.
+  - `Session` and `OAuthSession` print only the user, device and issuer.
+    Their JSON, the storage format, is unchanged.
+  - `Client` prints its user and device. It holds its session behind a
+    pointer and no longer keeps the login options it was opened with, so a
+    struct holding a `*Client` cannot print its access token.
+- `SASOptions.InRoom` adds in-room emoji verification with another user,
+  in both directions (TKT-01M5GZ5Z03PCS37JV0KSTR8JHS), which is how
+  Element verifies another user from their DM. An in-room request is
+  admitted from a listed peer when it names this account and is in an
+  encrypted room this account has joined. Each follow-up must be in that
+  room, from that user, and reference the request. Arriving unencrypted
+  is accepted, because Element sends these events unencrypted even in an
+  encrypted DM and the specification allows it; rihma encrypts its own.
+  The SAS gate logs why it passes over a verification event at debug
+  level, giving the event type, sender, room and a fixed reason and never
+  the content. The new `SASController.StartInRoom` posts a
+  request in such a room, and returns the new `ErrSASRoom` for any other
+  room before sending anything. Snapshots carry `Room`, and cancellation
+  goes to the room. Two mautrix v0.31.0 defects are worked around: its
+  helper looks in-room follow-ups up by their own event id, and its
+  `StartInRoomVerification` encrypts the request twice, so rihma posts the
+  request itself. If the request is posted but its transaction cannot be
+  saved, a cancellation referencing it follows at once. Options compared by a repeated `EnableSASWith` now
+  include `InRoom`. See docs/verification.md.
+- `Client.EnableSASWith` admits incoming to-device emoji verification
+  from the users listed in the new `SASOptions.Peers`
+  (TKT-01M5GZ5YYJ9M1VZ2DB4AK2XYST), so a bot can let its owner start the
+  verification. A listed user's request publishes requested under the
+  same bounds as this account's own; anyone else's is still dropped
+  without a reply. `Accept` first checks, as `StartUser` does, that this
+  device holds the account's cross-signing keys and that the user
+  publishes an identity, and on failure cancels the attempt and returns
+  `ErrNoCrossSigningKeys` or `ErrNoUserIdentity`. Completion signs and
+  records the user as for `StartUser`. `EnableSAS()` is
+  `EnableSASWith(SASOptions{})`; a second call with different options,
+  and `AwaitSAS` and `VerifyUser` on a controller with peers, return
+  `ErrSASUnavailable`. A peer equal to this account returns `ErrOwnUser`,
+  and a malformed one the new `ErrInvalidSASPeer`. See
+  docs/verification.md.
+- `Client.DiscoverRTCTransports` discovers MatrixRTC transports in an
+  explicitly negotiated dialect (TKT-01M3ZXQWXS0MKJE7GG1VSMXVRT). The pinned
+  mautrix `RTCTransports` reads the merged MSC4143/MSC4195 schema as an
+  empty list. rihma instead supports two dialects: `RTCTransportsStable`
+  (`transports`, `m.livekit` with `url`) and `RTCTransportsUnstable` (the
+  reference implementation's `rtc_transports`, `livekit` with `url` and/or
+  `livekit_service_url`). The caller picks the dialects it accepts. A
+  response is never reinterpreted in the other dialect.
+  `ErrRTCUnsupported` and `ErrRTCProtocol` separate an unsupported server
+  from a malformed answer, and an empty list is a genuine answer. Unknown
+  transports keep their raw object. LiveKit URLs must be absolute `wss://`
+  or `https://` URLs. Responses are bounded, and discovered URLs are never
+  contacted. Each discovery fetches `/versions` itself and leaves the
+  embedded client's unsynchronized `SpecVersions` alone. Both of its
+  requests are made once, without client or context retries (an OAuth
+  stale-token re-send aside), and are not logged. Both responses are parsed
+  by exact key and JSON kind, so a disallowed `null` (a feature flag,
+  `versions`, `type` or a LiveKit URL) is `ErrRTCProtocol`, never a quiet
+  zero. A malformed or oversized `/versions` is `ErrRTCProtocol`. A
+  `/versions` HTTP refusal, including a 404, stays an `HTTPError`. The
+  throwaway Synapse template now enables MSC4143. See docs/matrixrtc.md.
+- Sliding Sync capability discovery no longer writes the embedded mautrix
+  client's `SpecVersions` (TKT-01M3ZXQWXS0MKJE7GG1VSMXVRT). It reads
+  `/versions` into its own value, so it cannot race with concurrent RTC
+  discovery or with mautrix methods that read that field. Its retries and
+  logging are unchanged. An application that relied on Sync to fill
+  `SpecVersions` should call `Versions` itself.
+- The SAS test fixtures wait until the fake server has received the
+  ordinary sync request before a test begins (TKT-01M405NJBJY16CKZW2XV33Q5T1).
+  Sync starts the verification controller before it uploads its filter
+  and sends that request, so under load a test could finish first and
+  fail its one-sync or no-new-request check. Those checks now report the
+  counts they saw. No library behavior changes.
+- TestIdentityChangeIsReportedOnce waits for its first Sync run's held
+  long poll to reach the fake server before scripting the next response
+  (TKT-01M5JYS2BJG7AEY8G2FC4TWEAR). A stopped run's request still in
+  flight could otherwise take that response, time the test out, and log
+  after it ended, failing the whole package under load. No library
+  behavior changes.
+
 ## v0.1.11
 
 - `Client.VerifyUser` verifies another user with emoji from a bot that is
