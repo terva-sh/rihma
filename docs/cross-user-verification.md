@@ -1,12 +1,14 @@
 # Verifying another user
 
 This is the design for emoji (SAS) verification between this account and
-another user. Its first two slices have shipped: `SASController.StartUser`
-sends an outgoing to-device request to another user and signs them on
-completion, and `Client.VerifyUser` wraps it for a stopped bot (see
-[verification during sync](verification.md)). Incoming
-requests from other users and in-room verification are not implemented
-yet, and the controller still drops them. The sections below say what
+another user. All four of its slices have shipped:
+`SASController.StartUser` sends an outgoing to-device request to another
+user and signs them on completion, `Client.VerifyUser` wraps it for a
+stopped bot, `Client.EnableSASWith` admits incoming requests from the
+users listed in `SASOptions.Peers`, and with `SASOptions.InRoom` the
+controller verifies in a room in both directions, including
+`SASController.StartInRoom` (see [verification during
+sync](verification.md)). The sections below say what
 each route accepts, what must already be true before it starts, what it
 leaves behind, and the public interface and implementation slices that
 add it without changing the same-account behavior.
@@ -75,19 +77,23 @@ another user's device may share this device's id and is still a peer. The
 request was sent at most ten minutes ago and at most one minute in the
 future; the specification allows five minutes in the future, and rihma
 keeps today's tighter bound. A request from any other user is dropped
-without a reply, so a stranger cannot make the bot send messages.
+without a reply, so a stranger cannot make the bot send messages. A
+listed user's request from a device sharing this device's id passes the
+gate, and upstream behavior 4 below then ignores it.
 
 **Incoming in-room request.** `SASOptions.InRoom` is set. The sender is in
 `Peers`, `to` is this account, and the room is an encrypted room this
-account has joined. The event arrived encrypted, because an unencrypted
-event in an encrypted room is one the homeserver could have written. The
-age bounds use the event's timestamp.
+account has joined. The age bounds use the event's timestamp. The event
+may have arrived encrypted or not; see [encryption of in-room
+events](#encryption-of-in-room-events).
 
 **Follow-ups.** The sender is the transaction's peer user. A to-device
 follow-up names the active transaction id. An in-room follow-up is in the
-transaction's room, references the request event, and arrived
-encrypted. A `ready` names a `from_device`; for an outgoing
-to-device request it must be one of the devices the request was sent to.
+transaction's room and references the request event, whether or not it
+arrived encrypted. A `ready` names a `from_device`; for an outgoing
+to-device request it must be one of the devices the request was sent to,
+and an in-room `ready` is admitted only for a request this controller
+posted. A to-device event that names an in-room transaction is dropped.
 As with requests, the gate compares a device with this one only when the
 sender is this account.
 A follow-up from another user that carries the right transaction id is
@@ -101,9 +107,45 @@ peer device, and the others receive `m.accepted` cancellations. Naming
 the user is the consent, so `Peers` does not need to list them.
 
 **Outgoing in-room.** `StartInRoom(ctx, room, user)` posts the request in
-`room`, which must be an encrypted room this account has joined, and
-requires `SASOptions.InRoom`. The upstream helper encrypts the request
-whatever the room, so rihma checks the room first.
+`room`, which must be an encrypted room this account has joined
+(`ErrSASRoom`), and requires `SASOptions.InRoom` (`ErrSASUnavailable`).
+Both are checked before anything is sent. rihma posts the request
+itself, encrypted once by the client's normal send, rather than through
+the upstream helper, which encrypts it twice (upstream behavior 5 below),
+and records the transaction the helper would have recorded. The request
+event's id is the transaction id, and the controller's own timer expires
+it. If the request is posted but the transaction cannot be saved, rihma
+sends a cancellation referencing it at once, since nothing else could end
+it for the peer.
+
+## Encryption of in-room events
+
+An in-room verification event is admitted whether or not it arrived
+encrypted. Element Web sends the request and every follow-up unencrypted
+even in an encrypted DM, and a gate that required encryption dropped
+Element's request without a reply. The specification permits this: when
+the room is encrypted, "verification messages may be sent unencrypted,
+though this is not encouraged".
+
+Requiring encryption bought nothing that SAS needs. The emoji and the
+MACs carry SAS's security, not the transport: the MACs cover each side's
+device and master keys under a key derived from the exchange and bound
+to both users, both devices and the transaction, and a person compares
+the emoji. A homeserver that forges, alters or withholds an unencrypted
+event can make an attempt fail or never finish, which it could do to an
+encrypted one by withholding it, but cannot make a wrong key verify.
+To-device verification events, which rihma already admits, are
+unencrypted too, with a sender only the homeserver asserts. Megolm would
+not have proved more about the sender than a device that knows the room
+key, either.
+
+The other bindings stay: the room is encrypted and joined, the sender
+is listed, `to` names this account, follow-ups match the attempt's room
+and user and reference its request, and the age bounds hold. rihma
+still encrypts every in-room event it sends, through the client's normal
+send. The gate logs each event it passes over at debug level, with the
+event type, sender, room, whether it arrived encrypted, and a fixed
+reason, and never the content.
 
 ## Prerequisites
 
@@ -121,13 +163,20 @@ goroutine:
 - The peer publishes a master key (`ErrNoUserIdentity`). The check
   refreshes the peer's keys and devices in the crypto store, as
   `UserIdentity` does, so the MAC is checked against a current key.
-- For an outgoing request, none of the peer's devices has this device's
-  id (`ErrPeerDeviceIDConflict`). Upstream behavior 4 below would leave
+- For an outgoing to-device request, none of the peer's devices has this
+  device's id (`ErrPeerDeviceIDConflict`). An in-room request is not sent
+  to devices, so `StartInRoom` does not check this. Upstream behavior 4 below would leave
   such a device out of the request, so the person at it would never see
   one; rihma refuses rather than send a request that cannot reach them.
 
 For an incoming request these run at `Accept`. A failed check cancels the
-attempt and returns the error; nothing is sent before the check.
+attempt and returns the error; nothing is sent before the check. The
+cancellation carries `m.user`, and the snapshot ends cancelled with reason
+`cancelled`, since the caller already has the sentinel. A caller context
+that ends during the check is not a failed check: `Accept` returns its
+error and the request stays pending. `ErrPeerDeviceIDConflict` is not
+checked at `Accept`, because the request already came from a device the
+helper accepts.
 
 ## Completion and cross-signing
 
@@ -192,10 +241,11 @@ Everything here is added; nothing existing changes meaning.
 
 ```go
 // SASOptions widens what an SASController admits. The zero value is
-// today's same-account, to-device controller.
+// today's same-account, to-device controller. Shipped.
 type SASOptions struct {
 	// Peers are other users whose verification requests are admitted.
-	// Requests from anyone else are dropped without a reply.
+	// Requests from anyone else are dropped without a reply. Order and
+	// duplicates do not matter.
 	Peers []id.UserID
 	// InRoom admits in-room requests from Peers, and lets StartInRoom
 	// post one.
@@ -204,14 +254,18 @@ type SASOptions struct {
 
 // EnableSASWith is EnableSAS with options. EnableSAS() is
 // EnableSASWith(SASOptions{}). A second call returns the same controller
-// if the options are equal, and ErrSASUnavailable if they differ.
+// if the options are equal, and ErrSASUnavailable if they differ. A peer
+// equal to this account returns ErrOwnUser, and one that is not a user
+// id ErrInvalidSASPeer. Shipped.
 func (c *Client) EnableSASWith(opts SASOptions) (*SASController, error)
 
 // StartUser asks user's devices, over to-device messages, to verify this
 // account. It checks the prerequisites first. Shipped.
 func (s *SASController) StartUser(ctx context.Context, user id.UserID) (id.VerificationTransactionID, error)
 
-// StartInRoom asks user to verify this account in room.
+// StartInRoom asks user to verify this account in room, an encrypted
+// room this account has joined (ErrSASRoom). It needs InRoom and checks
+// the prerequisites first. Shipped.
 func (s *SASController) StartInRoom(ctx context.Context, room id.RoomID, user id.UserID) (id.VerificationTransactionID, error)
 
 // VerifyUser asks user to verify this account with emoji, shows confirm
@@ -225,8 +279,15 @@ func (c *Client) VerifyUser(ctx context.Context, user id.UserID, confirm func([]
 
 `Accept`, `Confirm`, `Cancel`, `Snapshot` and `Changed` work for every
 route. `Accept` runs the prerequisite checks for a cross-user request.
-The new snapshot reasons are `unsigned` and `identity_changed`. Errors
-reuse `ErrOwnUser`, `ErrNoCrossSigningKeys`, `ErrNoUserIdentity` and
+`AwaitSAS` accepts whatever request arrives, so it and `VerifyUser` keep
+calling `EnableSAS` and return `ErrSASUnavailable` on a client whose
+controller lists peers. Peers compare as a set so that a bot reading its
+owner list from configuration is not refused for reordering it, and a
+malformed or own-account peer is refused rather than ignored, so a
+misconfigured owner id fails at startup instead of silently admitting
+no one.
+`ErrSASRoom` is the one new error of the in-room slice. The new snapshot
+reasons are `unsigned` and `identity_changed`. Errors reuse `ErrOwnUser`, `ErrNoCrossSigningKeys`, `ErrNoUserIdentity` and
 `ErrMasterKeyMismatch` from [signing another user's
 identity](user-identity.md).
 
@@ -243,16 +304,19 @@ depends on the same-account QR controller, which is not public yet
 
 ## Upstream behavior this design works around
 
-Tests in `sas_cross_user_test.go` pin four behaviors of mautrix v0.31.0's
-`verificationhelper`. A dependency upgrade that changes any of them fails
+Tests in `sas_cross_user_test.go` and `sas_in_room_test.go` pin five
+behaviors of mautrix v0.31.0's `verificationhelper`. A dependency upgrade that changes any of them fails
 there, so the workaround can be revisited:
 
 1. Follow-ups are routed to a transaction by id alone, without checking
    that the sender is the transaction's user. The gate's sender binding is
    what stops a third party cancelling or steering an attempt.
 2. An in-room follow-up is looked up by its own event id, not the request
-   it references, so an in-room transaction never advances. The in-room
-   slice routes by the reference itself.
+   it references, so an in-room transaction never advances. After binding
+   a follow-up to its transaction, the gate hands the helper a copy whose
+   event id is the referenced request's. The copy keeps its
+   `m.relates_to`, so it stays right once upstream routes by the
+   reference.
 3. Cross-user SAS fails to sign the peer when the local side confirms
    after the peer's MAC has arrived. The completion slice holds that MAC.
 4. A device is compared with this one by id alone, without its user. The
@@ -264,6 +328,20 @@ there, so the workaround can be revisited:
    the peer publishes a device with this device's id. Callers should match
    that error rather than compare ids themselves, so their check goes
    away with the defect.
+5. `StartInRoomVerification` encrypts the request and passes the
+   ciphertext to `SendMessageEvent`, which encrypts it again in an
+   encrypted room, so the room receives an `m.room.message` whose content
+   is ciphertext and no client sees a request. `StartInRoom` sends the
+   request itself.
+
+A sixth is left alone because it is harmless. When the peer cancels a
+to-device request that is still in the requested state,
+`onVerificationCancel` sends "rejected" cancellations to every device the
+request went to, including the device that cancelled and, after `Start`,
+this device. The device that cancelled already knows, and the copy this
+device receives names a transaction that no longer exists, which the
+helper ignores. In-room transactions list no devices, so they never do
+this.
 
 Each should also be reported upstream; an upstream fix replaces the
 matching workaround rather than adding to it.
@@ -291,25 +369,44 @@ account or server outside the throwaway Synapse in `testing/synapse/`.
    success, `ErrSASMismatch` when confirm says no, and `ErrSASCancelled`
    when the peer cancels; it follows only its first transaction; a live
    test on throwaway Synapse accounts.
-3. **Incoming to-device SAS from listed users.** `EnableSASWith` with
+3. **Shipped: incoming to-device SAS from listed users.** `EnableSASWith` with
    `Peers`. Depends on slice 1. Tests: a listed user's request is
    admitted and completes with signatures; an unlisted user's request
    leaves no transaction, timer or reply; a listed user's request while
    busy is dropped; prerequisite failures at `Accept`; options differing
    on a second call are refused; the zero options keep today's behavior,
-   including every existing test.
-4. **In-room SAS with another user, both directions.** `SASOptions.InRoom`
+   including every existing test; a live test on throwaway Synapse
+   accounts in which the owner's request completes and a stranger's is
+   dropped.
+4. **Shipped: in-room SAS with another user, both directions.** `SASOptions.InRoom`
    and `StartInRoom`, routing in-room follow-ups by their reference, and
    the room and encryption binding. Depends on slice 3. Tests: an in-room
    request from a listed user in an encrypted DM completes; requests in a
-   room this account has not joined, in an unencrypted room, with `to`
-   naming someone else, or unencrypted in an encrypted room are dropped;
-   `StartInRoom` refuses an unencrypted or unjoined room before sending; follow-ups from the right
-   user in another room, or referencing another request, are dropped;
-   cancellation goes to the room; a live test in an encrypted DM.
+   room this account has not joined, in an unencrypted room, from an
+   unlisted user, or with `to` naming someone else are dropped, and each
+   drop is logged with its reason; an unencrypted request and follow-ups
+   in an encrypted room complete; `StartInRoom` refuses an unencrypted
+   or unjoined room before sending; follow-ups from the right user in
+   another room, or referencing another request, are dropped;
+   cancellation goes to the room; a live test in an encrypted DM. The
+   live test runs two rihma clients in each direction, once with both
+   encrypting and once with the owner sending unencrypted as Element
+   does, since the upstream helper cannot be the peer (behavior 2).
 
 The terminal flow needs slices 1 and 2. The in-chat flow also needs
 slices 3 and 4, since Element verifies another user in the DM.
+
+## Element and in-room requests
+
+When a person verifies another user from their DM, Element Web 1.12.30
+sends an `m.room.message` with msgtype `m.key.verification.request`,
+`from_device`, `methods` and `to`, and follow-ups that reference it with
+`m.relates_to`, all unencrypted although the DM is encrypted. The first
+version of the gate required in-room events to arrive encrypted and
+dropped that request without a trace, so the requirement was removed (see
+[encryption of in-room events](#encryption-of-in-room-events)) and drops
+are now logged at debug level. The live test covers a peer sending
+unencrypted.
 
 ## Element and to-device requests
 

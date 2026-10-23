@@ -2,7 +2,11 @@
 
 `Client.EnableSAS()` opts into to-device emoji verification before the
 client's first `Sync`: with this account's other devices in both
-directions, and outgoing with another user. It performs no network I/O.
+directions, and outgoing with another user. `Client.EnableSASWith(opts)`
+also admits requests from the users listed in `SASOptions.Peers` (see
+[accepting another user's request](#accepting-another-users-request)),
+and with `SASOptions.InRoom` runs verification in a room (see [in-room
+verification](#in-room-verification)). Neither performs network I/O.
 The returned `SASController` shares the existing crypto-aware syncer; it never
 starts another sync loop. Clients that do not opt in keep bot behavior.
 
@@ -43,8 +47,9 @@ cancellation reasons never enter snapshots or errors. Caller cancellation may
 occur after a request was sent; read the snapshot instead of assuming rollback.
 The controller suppresses helper context logging, including ephemeral SAS data.
 
-Only one attempt is active. Busy, same-device, incoming cross-user, in-room, oversized,
-old and excessively future-dated requests are ignored. IDs are remembered for the whole controller lifetime: a helper timer may be
+Only one attempt is active. Busy, same-device, unlisted-user, oversized,
+old and excessively future-dated requests are ignored, and so are in-room
+requests unless the controller was enabled with `InRoom`. IDs are remembered for the whole controller lifetime: a helper timer may be
 delayed beyond its deadline, so elapsed time cannot make ID reuse safe. At most
 64 incoming and outgoing attempts are admitted per controller/Sync, bounding
 remembered IDs and helper timers. Failed outgoing sends consume the same budget,
@@ -103,10 +108,111 @@ never accepts an incoming request, and returns `ErrSASMismatch`,
 request only from a user whose devices it already tracks, so the bot and
 the user must share an encrypted room, such as their DM, first. Compare the emoji
 over a channel the homeserver cannot change, such as the bot's terminal;
-see [verifying another user](cross-user-verification.md) for why, and for
-incoming and in-room verification, which are designed but not exposed.
+see [verifying another user](cross-user-verification.md) for why.
 QR is not exposed by this controller. SSO/OIDC login is unrelated and
 remains outside this feature.
+
+## Accepting another user's request
+
+A bot that should let its owner start the verification lists the owner
+when it enables the controller:
+
+```go
+controller, err := client.EnableSASWith(rihma.SASOptions{Peers: []id.UserID{owner}})
+```
+
+A to-device request from a listed user then publishes requested, with
+`OtherUser` set, under the same bounds as a request from this account's
+own devices: one attempt at a time, the same age, size and reuse limits,
+and the same 64-attempt budget. A request from any other user is
+dropped before mautrix sees it, with no reply, so a stranger cannot make
+the bot send anything. Peers compare as a set. A second call with
+different options returns `ErrSASUnavailable`, and so do `EnableSAS`,
+`AwaitSAS` and `VerifyUser` on a client whose controller lists peers,
+because `AwaitSAS` accepts whatever request arrives. A peer equal to
+this account returns `ErrOwnUser`, and one that is not a user id
+`ErrInvalidSASPeer`. `SASOptions.InRoom` is part of the options too.
+
+`Accept` on a listed user's request makes the checks `StartUser` makes
+before replying: `ErrNoCrossSigningKeys` and `ErrNoUserIdentity`. A failed
+check sends the user an `m.user` cancellation, ends the attempt
+cancelled, and returns the error; nothing else was sent. A caller context
+that ends during the check returns its error and leaves the request
+pending. The rest of the attempt, including the held MAC, the signature
+on the user's master key and the `unsigned` and `identity_changed`
+reasons, is as for `StartUser`.
+
+Element verifies another user with an in-room request in their DM, so a
+bot that Element users verify needs `InRoom` as well.
+
+mautrix v0.31.0 ignores a request from a device whose id equals this
+device's, even when it belongs to another user, so a person verifying
+from such a device sees no answer. Comparing the emoji in a chat the
+homeserver relays trusts that homeserver; see [two ways to compare the
+emoji](cross-user-verification.md#two-ways-to-compare-the-emoji).
+
+## In-room verification
+
+Element verifies another user in a room, normally their DM: the request
+is an `m.room.message` with msgtype `m.key.verification.request`, and
+each later step is a room event that references it. A controller enabled
+with `InRoom` takes part in both directions:
+
+```go
+controller, err := client.EnableSASWith(rihma.SASOptions{Peers: []id.UserID{owner}, InRoom: true})
+// The owner verifies the bot from Element: the request publishes
+// requested with Room set, and Accept answers it as above.
+// Or the bot asks:
+transactionID, err := controller.StartInRoom(commandContext, dm, owner)
+```
+
+An in-room request is admitted when its sender is in `Peers`, it names
+this account in `to`, it is in an encrypted room this account has joined,
+and it was sent at most ten minutes ago and at most a minute in the
+future. A follow-up is admitted only when it is in the attempt's room,
+from the attempt's user, and references the attempt's request event.
+Either may have arrived unencrypted: Element sends them that way even in
+an encrypted DM, as the specification allows, and SAS rests on the MACs
+and the emoji rather than on the transport. A peer's
+ready is admitted only for a request this controller posted. Everything
+else is dropped before mautrix sees it, as are to-device events naming an
+in-room transaction. Each event the gate passes over is logged at debug
+level with a fixed reason and no content. The bounds shared with
+to-device requests apply: one attempt at a time across both routes, and
+the same 64-attempt budget.
+
+`StartInRoom(ctx, room, user)` posts the request in `room`, which must be
+an encrypted room this account has joined (`ErrSASRoom` otherwise), and
+needs `InRoom` (`ErrSASUnavailable`). It makes `StartUser`'s checks except
+`ErrPeerDeviceIDConflict`, which concerns to-device requests only, and a
+failed check sends nothing. The transaction id is the request event's id.
+Snapshots carry `Room`. Cancellation, a mismatch and the timeout are sent
+to the room, encrypted; completion is as for `StartUser`.
+
+Two things in mautrix v0.31.0 are worked around. Its helper looks an
+in-room follow-up up by the follow-up's own event id instead of the
+request it references, so the gate hands it the event with the request's
+id. Its `StartInRoomVerification` encrypts the request twice, so no client
+can read it; rihma posts the request itself, encrypted once.
+
+A test that needs a peer behaving like Element, which sends its in-room
+verification events unencrypted, can use a second rihma client with
+encryption switched off for sending. Only mautrix's `SendMessageEvent`
+reads the embedded client's `Crypto` field, and the crypto machine keeps
+receiving room keys and decrypting incoming events without it, so once
+the peer has synced:
+
+```go
+// Test code only: from here on every event this client sends is
+// plaintext, in every room, not just its verification events.
+peer.Client.Crypto = nil
+```
+
+rihma offers no option for this, because a switch that sends plaintext
+in an encrypted room has no use outside a test.
+
+Comparing the emoji in the room trusts the homeserver; see [two ways to
+compare the emoji](cross-user-verification.md#two-ways-to-compare-the-emoji).
 
 Device trust and key recovery use the existing `Verification`,
 `RestoreFromRecoveryKey` and `RestoreKeyBackup` operations. A missing identity is

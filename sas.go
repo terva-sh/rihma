@@ -44,7 +44,8 @@ var (
 // sync, so it fails with ErrSyncInProgress while anything else syncs on
 // this state directory, such as a running connector. Call it on a client
 // that is not syncing, and bound the wait with ctx. A Client can answer
-// only one verification in its lifetime.
+// only one verification in its lifetime. It returns ErrSASUnavailable on a
+// client whose controller was enabled with SASOptions.Peers.
 func (c *Client) AwaitSAS(ctx context.Context, confirm func([]SASEmoji) bool) error {
 	if err := c.Connect(ctx); err != nil {
 		return err
@@ -94,7 +95,9 @@ func (c *Client) AwaitSAS(ctx context.Context, confirm func([]SASEmoji) bool) er
 //
 // Like AwaitSAS it runs its own Sync, so it fails with ErrSyncInProgress
 // while anything else syncs on this state directory, and a Client can run
-// only one verification in its lifetime. Bound the wait with ctx.
+// only one verification in its lifetime. Bound the wait with ctx. Like
+// AwaitSAS it returns ErrSASUnavailable on a client whose controller was
+// enabled with SASOptions.Peers.
 func (c *Client) VerifyUser(ctx context.Context, user id.UserID, confirm func([]SASEmoji) bool) (id.Ed25519, error) {
 	if user == c.UserID {
 		return "", ErrOwnUser
