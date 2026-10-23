@@ -304,6 +304,10 @@ func TestIdentityChangeIsReportedOnce(t *testing.T) {
 	h.script(changed("s1"))
 	stop := runSync(t, bot)
 	want("sync", third)
+	// Wait for the long poll after s1 to reach the server and find the
+	// script empty. Stopped while still in flight, it could reach the
+	// handler after the s2 script below and consume it.
+	waitFor(t, "the long poll after s1", func() bool { return slices.Contains(h.seenSinces(), "s1") })
 	if err := stop(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Sync = %v", err)
 	}

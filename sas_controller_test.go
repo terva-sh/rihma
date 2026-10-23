@@ -47,6 +47,7 @@ func sasTestClient(t *testing.T, intercept ...func(http.ResponseWriter, *http.Re
 	done := make(chan error, 1)
 	go func() { done <- c.Sync(ctx) }()
 	sasWait(t, func() bool { controller.mu.Lock(); defer controller.mu.Unlock(); return controller.started })
+	h.awaitSyncRequests(t, 1)
 	stop := func() {
 		cancel()
 		<-done
@@ -100,8 +101,8 @@ func TestSASNormalSyncRepeatedCancelAndScope(t *testing.T) {
 			t.Fatal("stale command accepted")
 		}
 	}
-	if len(h.seenSinces()) != 1 {
-		t.Fatal("verification spawned additional sync")
+	if n := len(h.seenSinces()); n != 1 {
+		t.Fatalf("ordinary sync requests = %d, want 1: verification spawned additional sync", n)
 	}
 }
 func TestSASTimeoutReasonAndShutdown(t *testing.T) {

@@ -108,8 +108,8 @@ func TestSASOutgoingScopeSelectionAndRepeat(t *testing.T) {
 	if len(last.Messages[c.UserID]) != 2 || last.Messages[c.UserID][c.DeviceID] != nil {
 		t.Fatal("pending cancellation did not reach requested peers")
 	}
-	if len(h.seenSinces()) != 1 {
-		t.Fatal("outgoing verification started another sync")
+	if n := len(h.seenSinces()); n != 1 {
+		t.Fatalf("ordinary sync requests = %d, want 1: outgoing verification started another sync", n)
 	}
 }
 
@@ -171,8 +171,8 @@ func TestSASOutgoingFailedSendsShareLifetimeBudget(t *testing.T) {
 		t.Fatal("failed-send timer budget not bounded")
 	}
 	sasRequest(c, "after-budget", c.UserID, "OTHER", time.Now().Add(time.Minute))
-	if h.requests.Load() != n {
-		t.Fatal("budget exhausted start sent a request")
+	if got := h.requests.Load(); got != n {
+		t.Fatalf("requests %d -> %d: budget exhausted start sent a request", n, got)
 	}
 	if all, _ := s.store.GetAllVerificationTransactions(context.Background()); len(all) != 0 {
 		t.Fatal("incoming request bypassed shared budget")
@@ -187,8 +187,8 @@ func TestSASOutgoingNoPeerAndCancelledCaller(t *testing.T) {
 	if _, err := s.Start(context.Background()); !errors.Is(err, ErrSASOperation) {
 		t.Fatal("empty recipient set accepted")
 	}
-	if h.requests.Load() != n || s.gate.attempts != 0 {
-		t.Fatal("no-peer preflight created network work or timer")
+	if got := h.requests.Load(); got != n || s.gate.attempts != 0 {
+		t.Fatalf("requests %d -> %d, attempts = %d: no-peer preflight created network work or timer", n, got, s.gate.attempts)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -85,6 +85,7 @@ func newCrossUserSAS(t *testing.T, botIdentity, ownerIdentity bool, ownerDevice 
 	go func() { done <- x.bot.Sync(ctx) }()
 	sasWait(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.started })
 	t.Cleanup(func() { cancel(); <-done })
+	x.h.awaitSyncRequests(t, 1)
 	return x
 }
 

@@ -110,6 +110,15 @@ func (h *testHS) seenSinces() []string {
 	return append([]string(nil), h.sinces...)
 }
 
+// awaitSyncRequests waits until the server has received at least n
+// ordinary /sync requests. Sync starts its SAS controller before it
+// uploads the filter and sends the first request, so a started
+// controller does not mean the loop has reached the server.
+func (h *testHS) awaitSyncRequests(t *testing.T, n int) {
+	t.Helper()
+	waitFor(t, "the ordinary sync request", func() bool { return len(h.seenSinces()) >= n })
+}
+
 const testUser = id.UserID("@bot:localhost")
 
 func testOptions(t *testing.T, h *testHS, dir string) Options {
